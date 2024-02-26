@@ -49,7 +49,7 @@ def train(mb, idx):
 def test(mb, idx):
     score = mb['models'][idx].score(mb['data']['inputs'], mb['data']['outputs'])
     res = score >= mb['pthreshold']
-    print(f"Model {idx} score = {score} meets pthreshold {mb['pthreshold']} => production = {res}")
+    print(f"Compare Model {idx} score = {score} with pthreshold {mb['pthreshold']} => production = {res}")
     mb['production'][idx] = res
     production = sum(mb['production'])
     if production == 0: 
@@ -62,6 +62,10 @@ def trainall(mb):
     for idx in range(len(mb['models'])):
         train(mb, idx)
 
+def testall(mb):
+    for idx in range(len(mb['models'])):
+        test(mb, idx)
+
 def productionize(mb):
     mb['state'] = 'production' 
 
@@ -69,8 +73,15 @@ def embed(mb):
     mb['functions'].append(mb['host'])
     mb['state'] = 'embedded' 
 
+def adddata(mb, x, y):
+    mb['data']['inputs'] += x
+    mb['data']['outputs'] += y
+
+def gendata(f, count=1000):
+    return [[x] for x in range(count)], [f(x) for x in range(count)]
+
 def mbprint(tag, mb):
-    print(f"{tag}: state:{mb['state']}, #models:{len(mb['models'])}, production:{mb['production']}, #functions:{len(mb['functions'])}, pthreshold:{mb['pthreshold']}, inputs:{mb['data']['inputs']}, outputs:{mb['data']['outputs']}")
+    print(f"{tag}: state:{mb['state']}, #models:{len(mb['models'])}, production:{mb['production']}, #functions:{len(mb['functions'])}, pthreshold:{mb['pthreshold']}, inputs:{mb['data']['inputs'][-10:]}, outputs:{mb['data']['outputs'][-10:]}")
 
 @mbw(mb)
 def f(x): 
@@ -92,8 +103,17 @@ addmodel(mb, MLPRegressor(hidden_layer_sizes=(), activation='identity'))
 mbprint('After training and testing the added model', mb)
 f(7); f(8); mbprint('After a few more function calls', mb)
 
-mb['pthreshold'] = -100
-mbprint('After updating threshold', mb)
+xy = gendata(f)
+adddata(mb, xy[0], xy[1])
+mbprint('After adding more data but before training', mb)
 trainall(mb)
-mbprint('After retraining all models with the new threshold', mb)
-f(9); f(10); mbprint('After a few more function calls', mb)
+mbprint('After training and testing with the new data', mb)
+f(998); f(999); mbprint('After a few more function calls', mb)
+
+if mb['production'][1] == False:
+    mb['pthreshold'] = -100
+    mbprint('After updating threshold', mb)
+    testall(mb)
+    mbprint('After retesting all models with the new threshold', mb)
+    f(998); f(999); mbprint('After a few more function calls', mb)
+
