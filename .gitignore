@@ -5,7 +5,7 @@
 __pycache__/
 *.pyc
 ~*
-tmp.*
+tmp*.*
 *.pkl
 *.pt
 *.bin

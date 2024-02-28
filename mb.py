@@ -5,164 +5,165 @@ from sklearn.neural_network import MLPRegressor
 import warnings
 warnings.filterwarnings("ignore") 
 
-mb = {  'data': {'inputs': [], 'outputs': []},
-        'models': [],
-        'production': [],
-        'functions': [],
-        'maf': lambda x: (msum(mb, x) + fsum(mb, x)) / (sum(mb['production']) + len(mb['functions'])),
-        'state': 'connected', # connected, production, embedded
-        'pthreshold': 0.95,
-    }
+class ModelBox():
+    def __init__(self):
+        super().__init__()
+        self.data = {'inputs': [], 'outputs': []}
+        self.models = []
+        self.production = []
+        self.functions = []
+        self.state = 'connected' # connected, production, embedded
+        self.pthreshold = 0.95
+
+    def __call__(self, x):
+        fsum = sum([f(x) for f in self.functions])
+        msum = sum([model.predict([[x]]) for idx, model in enumerate(self.models) if self.production[idx]])
+        return (msum + fsum) / (sum(self.production) + len(self.functions))
+        
+    def mbw(self):
+        def decorator(f):
+            def wrapper(x):
+                self.host = f
+                if self.state == 'connected':
+                    y = f(x)
+                    y = self.feedback(x, y)
+                elif self.state == 'production':
+                    y = (self(x) + f(x))[0] / 2
+                    y = self.feedback(x, y)
+                else: # self.state == 'embedded'
+                    y = self(x)[0]
+                self.data['inputs'].append([x])
+                self.data['outputs'].append(y)
+                return y
+            return wrapper
+        return decorator
     
-def mbw(mb):
-    def decorator(f):
-        def wrapper(x):
-            mb['host'] = f
-            if mb['state'] == 'connected':
-                y = f(x)
-                y = feedback(x, y)
-            elif mb['state'] == 'production':
-                y = (mb['maf'](x) + f(x))[0] / 2
-                y = feedback(x, y)
-            else: # mb['state'] == 'embedded'
-                y = mb['maf'](x)[0]
-            mb['data']['inputs'].append([x])
-            mb['data']['outputs'].append(y)
-            return y
-        return wrapper
-    return decorator
+    def addmodel(self, model):
+        self.models.append(model)
+        self.production.append(False)
+        self.print('After adding a model, but before training it')
+        return self.train(len(self.models) - 1)
 
-def fsum(mb, x):
-    return sum([f(x) for f in mb['functions']])
+    def removemodel(self, idx):
+        self.models.pop(idx)
+        self.production.pop(idx)
 
-def msum(mb, x):
-    return sum([model.predict([[x]]) for idx, model in enumerate(mb['models']) if mb['production'][idx]])
+    def train(self, idx):
+        self.models[idx].fit(self.data['inputs'], self.data['outputs'])
+        return self.test(idx)
 
-def feedback(x, y):
-    newy = input(f"{x=}, {y=}. To override y, type a new value (float) and return, otherwise just press return:")
-    if newy != '':  
-        return float(newy)
-    return y  
+    def test(self, idx):
+        score = self.models[idx].score(self.data['inputs'], self.data['outputs'])
+        res = score >= self.pthreshold
+        print(f"Compare Model {idx} score = {score} with pthreshold {self.pthreshold} => production = {res}")
+        self.production[idx] = res
+        production = sum(self.production)
+        if production == 0: 
+            self.state = 'connected'
+        elif self.state == 'connected': 
+            self.state = 'production'
+        return res
 
-def addmodel(mb, model):
-    mb['models'].append(model)
-    mb['production'].append(False)
-    mbprint('After adding a model, but before training it', mb)
-    return train(mb, len(mb['models']) - 1)
+    def trainall(self):
+        for idx in range(len(self.models)):
+            self.train(idx)
 
-def removemodel(mb, idx):
-    mb['models'].pop(idx)
-    mb['production'].pop(idx)
+    def testall(self):
+        for idx in range(len(self.models)):
+            self.test(idx)
 
-def train(mb, idx):
-    mb['models'][idx].fit(mb['data']['inputs'], mb['data']['outputs'])
-    return test(mb, idx)
+    def productionize(self):
+        self.state = 'production' 
 
-def test(mb, idx):
-    score = mb['models'][idx].score(mb['data']['inputs'], mb['data']['outputs'])
-    res = score >= mb['pthreshold']
-    print(f"Compare Model {idx} score = {score} with pthreshold {mb['pthreshold']} => production = {res}")
-    mb['production'][idx] = res
-    production = sum(mb['production'])
-    if production == 0: 
-        mb['state'] = 'connected'
-    elif mb['state'] == 'connected': 
-        mb['state'] = 'production'
-    return res
+    def embed(self):
+        self.functions.append(self.host)
+        self.state = 'embedded' 
 
-def trainall(mb):
-    for idx in range(len(mb['models'])):
-        train(mb, idx)
+    def adddata(self, x, y):
+        self.data['inputs'] += x
+        self.data['outputs'] += y
 
-def testall(mb):
-    for idx in range(len(mb['models'])):
-        test(mb, idx)
+    def removedata(self):
+        self.data['inputs'] = []
+        self.data['outputs'] = []
 
-def productionize(mb):
-    mb['state'] = 'production' 
+    def addfn(self, fn):
+        self.functions.append(fn)
 
-def embed(mb):
-    mb['functions'].append(mb['host'])
-    mb['state'] = 'embedded' 
+    def removefn(self, idx):
+        self.functions.pop(idx)
 
-def adddata(mb, x, y):
-    mb['data']['inputs'] += x
-    mb['data']['outputs'] += y
+    def feedback(self, x, y):
+        newy = input(f"{x=}, {y=}. To override y, type a new value (float) and return, otherwise just press return:")
+        if newy != '':  
+            return float(newy)
+        return y  
 
-def removedata(mb):
-    mb['data']['inputs'] = []
-    mb['data']['outputs'] = []
-
-def addfn(mb, fn):
-    mb['functions'].append(fn)
-
-def removefn(mb, idx):
-    mb['functions'].pop(idx)
-
-def mbprint(tag, mb):
-    print(f"{tag}: state:{mb['state']}, #functions:{len(mb['functions'])}, #models:{len(mb['models'])}, production:{mb['production']}, pthreshold:{mb['pthreshold']}; inputs:{'...' if len(mb['data']['inputs']) > 10 else ''}{mb['data']['inputs'][-10:]}; outputs:{'...' if len(mb['data']['outputs']) > 10 else ''}{mb['data']['outputs'][-10:]}")
+    def print(self, tag):
+        print(f"{tag}: state:{self.state}, #functions:{len(self.functions)}, #models:{len(self.models)}, production:{self.production}, pthreshold:{self.pthreshold}; inputs:{'...' if len(self.data['inputs']) > 10 else ''}{self.data['inputs'][-10:]}; outputs:{'...' if len(self.data['outputs']) > 10 else ''}{self.data['outputs'][-10:]}")
 
 def gendata(f, count=1000):
     return [[x] for x in range(count)], [f(x) for x in range(count)]
 
-@mbw(mb)
+mb = ModelBox()
+@mb.mbw()
 def f(x): 
     return 3 * x + 2
 
-mbprint('Intial MB', mb)
+mb.print('Intial MB')
 f(1)
 f(2)
-mbprint('After a few function calls',mb)
+mb.print('After a few function calls')
 
-addmodel(mb, LinearRegression())
-mbprint('After training and testing the added model', mb)
+mb.addmodel(LinearRegression())
+mb.print('After training and testing the added model')
 f(3)
 f(4)
-mbprint('After a few more function calls', mb)
+mb.print('After a few more function calls')
 
-if mb['state'] == 'production': 
-    embed(mb)
-    mbprint('After embedding', mb)
+if mb.state == 'production': 
+    mb.embed()
+    mb.print('After embedding')
     f(5)
     f(6)
-    mbprint('After a few more function calls', mb)
+    mb.print('After a few more function calls')
 
-addmodel(mb, MLPRegressor(hidden_layer_sizes=(), activation='identity'))
-mbprint('After training and testing the added model', mb)
+mb.addmodel(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
+mb.print('After training and testing the added model')
 f(7)
 f(8)
-mbprint('After a few more function calls', mb)
+mb.print('After a few more function calls')
 
 xy = gendata(f)
-adddata(mb, xy[0], xy[1])
-mbprint('After adding more data but before training', mb)
-trainall(mb)
-mbprint('After training and testing with the new data', mb)
+mb.adddata(xy[0], xy[1])
+mb.print('After adding more data but before training')
+mb.trainall()
+mb.print('After training and testing with the new data')
 f(998)
 f(999)
-mbprint('After a few more function calls', mb)
+mb.print('After a few more function calls')
 
-if mb['production'][1] == False:
-    mb['pthreshold'] = -100
-    mbprint('After updating threshold', mb)
-    testall(mb)
-    mbprint('After retesting all models with the new threshold', mb)
+if mb.production[1] == False:
+    mb.pthreshold = -100
+    mb.print('After updating threshold')
+    mb.testall()
+    mb.print('After retesting all models with the new threshold')
     f(998)
     f(999)
-    mbprint('After a few more function calls', mb)
+    mb.print('After a few more function calls')
 
-removemodel(mb, 1)
-mb['pthreshold'] = 0.95
-mbprint('After removing the second model and reverting the threshold', mb)
+mb.removemodel(1)
+mb.pthreshold = 0.95
+mb.print('After removing the second model and reverting the threshold')
 
-addfn(mb, lambda x: x * x)
-mbprint('After adding a new function', mb)
+mb.addfn(lambda x: x * x)
+mb.print('After adding a new function')
 
-removefn(mb, 1)
-mbprint('After removing the second function', mb)
+mb.removefn(1)
+mb.print('After removing the second function')
 
-removedata(mb)
-mbprint('After removing all data', mb)
+mb.removedata()
+mb.print('After removing all data')
 f(998)
 f(999)
-mbprint('After a few more function calls', mb)
+mb.print('After a few more function calls')
