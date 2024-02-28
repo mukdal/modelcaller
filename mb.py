@@ -24,7 +24,7 @@ class ModelBox(): # main MB class
         msum = sum([model.predict([[x]]) for idx, model in enumerate(self.models) if self.isproduction[idx]])
         return (msum + fsum) / (sum(self.isproduction) + len(self.functions))
         
-    def function_wrapper(self):
+    def function_wrapper(self): # wrap MB  around some function f
         def decorator(f):
             def wrapper(x):
                 self.host = f
@@ -36,15 +36,31 @@ class ModelBox(): # main MB class
                     y = self.get_feedback(x, y)
                 else: # self.state == 'embedded'
                     y = self(x)[0]
-                if random() <= self.edata_fraction: # cache as evaluation data
-                    self.edata['inputs'].append([x])
-                    self.edata['outputs'].append(y)
-                else:
-                    self.tdata['inputs'].append([x])
-                    self.tdata['outputs'].append(y)
+                self.add_data(x, y)
                 return y
             return wrapper
         return decorator
+    
+    def sensor_wrapper(self, kind='direct'): # wrap a sensor around some function g
+        def decorator(g): # add other sensors as needed
+            def direct(x): # direct sensor
+                y = g(x)
+                self.add_data(x, y)
+                return y
+            def inverse(y): # inverse sensor
+                x = g(y)
+                self.add_data(x, y)
+                return y
+            return eval(kind)
+        return decorator
+    
+    def add_data(self, x, y):
+        if random() <= self.edata_fraction: # cache as evaluation data
+            self.edata['inputs'].append([x])
+            self.edata['outputs'].append(y)
+        else:
+            self.tdata['inputs'].append([x])
+            self.tdata['outputs'].append(y)
     
     def add_model(self, model):
         self.models.append(model)
@@ -87,11 +103,11 @@ class ModelBox(): # main MB class
         self.functions.append(self.host)
         self.state = 'embedded' 
 
-    def add_data(self, x, y, kind='tdata'):
+    def add_dataset(self, x, y, kind='tdata'):
         eval('self.'+ kind)['inputs'] += x
         eval('self.'+ kind)['outputs'] += y
 
-    def remove_data(self, kind='tdata'):
+    def remove_dataset(self, kind='tdata'):
         eval('self.'+ kind)['inputs'] = []
         eval('self.'+ kind)['outputs'] = []
 
@@ -149,7 +165,7 @@ repeat_function(f)
 mb.print('After a few more function calls')
 
 xy = generate_data(f)
-mb.add_data(xy[0], xy[1])
+mb.add_dataset(xy[0], xy[1])
 mb.print('After adding more data but before training')
 mb.train_all()
 mb.print('After training and testing with the new data')
@@ -174,7 +190,21 @@ mb.print('After adding a new function')
 mb.remove_function(1)
 mb.print('After removing the second function')
 
-mb.remove_data()
+mb.remove_dataset()
 mb.print('After removing all data')
 repeat_function(f)
 mb.print('After a few more function calls')
+
+@mb.sensor_wrapper()
+def fcopy(x):
+    return 3 * x + 2
+
+repeat_function(fcopy)
+mb.print('After a few direct-sensor calls')
+
+@mb.sensor_wrapper('inverse')
+def finv(y):
+    return y / 3 - 2
+
+repeat_function(finv)
+mb.print('After a few inverse-sensor calls')
