@@ -1,10 +1,12 @@
 """mb.py. Copyright (C) 2024, Mukesh Dalal <mukesh.dalal@gmail.com>"""
 
+import inspect
 from random import random
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 import warnings
 warnings.filterwarnings("ignore")
+globalx = 0
 
 class ModelBox(): # main MB class
     def __init__(self):
@@ -19,24 +21,27 @@ class ModelBox(): # main MB class
         self.edata_fraction = 0.3 # fraction of cached data randomly chosen for evaluation
         self.feedback_fraction = 0.1 # fraction of calls randomly chosen for feedback from users
 
-    def __call__(self, *xs):
+    def __call__(self, *xs, cvals=None):
+        if cvals == None:
+            cvals = tuple()
         fsum = sum([f(*xs) for f in self.functions])
-        msum = sum([model.predict([list(xs)]) for idx, model in enumerate(self.models) if self.isproduction[idx]])
+        msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self.models) if self.isproduction[idx]])
         return (msum + fsum) / (sum(self.isproduction) + len(self.functions))
         
-    def function_wrapper(self): # wrap MB  around some function f
+    def function_wrapper(self, *cfields): # wrap MB around some function f with context data from cfields
         def decorator(f):
             def wrapper(*xs):
                 self.host = f
+                cvals = self.context(*cfields)
                 if self.state == 'connected':
                     y = f(*xs)
-                    y = self.get_feedback(y, *xs)
+                    y = self.get_feedback(y, *xs, cvals=cvals)
                 elif self.state == 'production':
-                    y = (self(*xs) + f(*xs))[0] / 2
-                    y = self.get_feedback(y, *xs)
+                    y = (self(*xs, cvals=cvals) + f(*xs))[0] / 2
+                    y = self.get_feedback(y, *xs, cvals=cvals)
                 else: # self.state == 'embedded'
-                    y = self(*xs)[0]
-                self.add_data(y, *xs)
+                    y = self(*xs, cvals=cvals)[0]
+                self.add_data(y, *xs, *cvals)
                 return y
             return wrapper
         return decorator
@@ -47,10 +52,10 @@ class ModelBox(): # main MB class
                 y = g(*xs)
                 self.add_data(y, *xs)
                 return y
-            def inverse(*yxs): # inverse sensor, yxs = (y, xs except xlast)
-                xlast = g(*yxs)
-                self.add_data(yxs[0], *yxs[0:], xlast)
-                return xlast
+            def inverse(*yxs): # inverse sensor, yxs = (y, xs except xfirst)
+                xfirst = g(*yxs)
+                self.add_data(yxs[0], xfirst, *yxs[0:])
+                return xfirst
             return eval(kind)
         assert kind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
         return decorator
@@ -122,9 +127,11 @@ class ModelBox(): # main MB class
     def remove_function(self, idx):
         self.functions.pop(idx)
 
-    def get_feedback(self, y, *xs):
+    def get_feedback(self, y, *xs, cvals=None):
+        if cvals == None:
+            cvals = tuple()
         if random() <= self.feedback_fraction:
-            newy = input(f"x={roundl(list(xs))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
+            newy = input(f"x={roundl(list(xs))}, context={roundl(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
             if newy != '':  
                 return float(newy)
         return y 
@@ -132,12 +139,33 @@ class ModelBox(): # main MB class
     def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
         print(f"{tag}: state:{self.state}, #functions:{len(self.functions)}, #models:{len(self.models)}, production:{self.isproduction}, #tdata:{len(self.tdata['inputs'])}, #edata:{len(self.edata['inputs'])}; tinputs:{'...' if len(self.tdata['inputs']) > ntail  else ''}{roundl(self.tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self.tdata['outputs']) > ntail else ''}{roundl(self.tdata['outputs'][-ntail:])}; einputs:{'...' if len(self.edata['inputs']) > ntail  else ''}{roundl(self.edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self.edata['outputs']) > ntail else ''}{roundl(self.edata['outputs'][-ntail:])})")
 
-def generate_data(f, count=1000):
-    return [[x, x+1] for x in range(count)], [f(x, x+1) for x in range(count)]
+    @staticmethod
+    def context(*cfields):
+        try:
+            frame = inspect.currentframe().f_back
+            all_variables = {**frame.f_globals, **frame.f_locals}
+            cvals = [v for k, v in all_variables.items() if k in cfields]
+            return cvals
+        finally:
+            del frame
 
-def repeat_function(f, count=10, scale=100):
+def generate_data(f, count=1000, scale=100):
+    global globalx
+    inputs, outputs = [], []
     for _ in range(count):
-        f(random()*scale, random()*scale)
+        globalx = random() * scale
+        x0 = random() * scale
+        x1 = random() * scale
+        inputs.append([x0, x1, globalx])
+        outputs.append(f(x0, x1))
+    return inputs, outputs
+
+def repeat_function(f, arity=2, count=10, scale=100):
+    global globalx
+    for _ in range(count):
+        globalx = random() * scale
+        args = [random() * scale for _ in range(arity)]
+        f(*args)
 
 def roundl(xl, places=0):
     if type(xl) in (list, tuple): 
@@ -145,9 +173,10 @@ def roundl(xl, places=0):
     return round(xl, places)
 
 mb = ModelBox()
-@mb.function_wrapper()
+@mb.function_wrapper('globalx')
 def f(x0, x1): 
-    return 3 * x0 + x1
+    global globalx
+    return 3 * x0 + x1 + globalx
 
 mb.print('Intial MB')
 repeat_function(f)
@@ -193,8 +222,8 @@ mb.print('After removing the second model and reverting the threshold')
 mb.add_function(lambda x: x * x)
 mb.print('After adding a new function')
 
-mb.remove_function(1)
-mb.print('After removing the second function')
+mb.remove_function(-1)
+mb.print('After removing the last function')
 
 mb.remove_dataset()
 mb.print('After removing all data')
@@ -202,15 +231,15 @@ repeat_function(f)
 mb.print('After a few more function calls')
 
 @mb.sensor_wrapper()
-def fcopy(x0, x1):  # y
-    return 3 * x0 + x1
+def fcopy(x0, x1, x3):  # y
+    return 3 * x0 + x1 + x3
 
-repeat_function(fcopy)
+repeat_function(fcopy, arity=3)
 mb.print('After a few direct-sensor calls')
 
 @mb.sensor_wrapper('inverse')
-def finv(y, x0):  # x1
-    return y - 3 * x0
+def finv(y, x1, x2):  # x1
+    return (y - x1 -  x2) / 3
 
-repeat_function(finv)
+repeat_function(finv, arity=3)
 mb.print('After a few inverse-sensor calls')
