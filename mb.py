@@ -7,53 +7,100 @@ from sklearn.neural_network import MLPRegressor
 import warnings
 warnings.filterwarnings("ignore")
 
-class FloatCallback(float): # float with a callback function
+class CallbackBase: # for adding callbacks to objects w/o dynamic attributes
+    def __init__(self, value, callback):
+        self.value = value
+        self.cbfn = callback
+    def callback(self, *args, **kwargs):
+        return self.cbfn(*args, **kwargs)
+    def __getattr__(self, item): # delegate any attribute not defined here to the value
+        return getattr(self.value, item)
+    
+class FloatCallback(CallbackBase, float):
     def __new__(cls, value, callback):
-        obj = super().__new__(cls, value)
-        obj.function = callback
+        assert isinstance(value, float) or isinstance(value, int), "non-float/int value passed to FloatCallback"
+        obj = float.__new__(cls, value)  # Create a float instance
+        obj.callback = callback  # Assign the callback directly to this float instance
         return obj
-    def callback(self, *args):
-        return self.function(*args)
     
 class ModelBox(): # main MB class
     def __init__(self):
         super().__init__()
-        self._tdata = {'inputs': [], 'outputs': []}  # saved training data
-        self._edata = {'inputs': [], 'outputs': []}  # saved evaluation data
-        self._models = [] # list of models
-        self._isproduction = [] # production status of each model
-        self._functions = [] # list of functions
-        self._state = 'connected' # connected, production, embedded
-        self.pmaccuracy = 0.95 # accuracy threshold for production models; a non-embedded MB has production state iff at least one model has production status
+        self.acc_threshold = 0.95 # accuracy threshold for calling models when MB is called 
         self.edata_fraction = 0.3 # fraction of cached data randomly chosen for evaluation
-        self.feedback_fraction = 0.1 # fraction of calls randomly chosen for feedback from users
+        self.feedback_fraction = 0.1 # fraction of host calls randomly chosen for feedback from users
+        self._call_state = 'host' # host, MB, both : who to call when the host fn is called?
+        self._edata = {'inputs': [], 'outputs': []}  # saved evaluation data
+        self._functions = [] # list of functions
+        self._host = None   # original unwrapped host function (gets populated by function_wrap)
+        self._models = [] # list of models
+        self._tdata = {'inputs': [], 'outputs': []}  # saved training data
         
     def __call__(self, *xs, cvals=None):
         if cvals == None:
             cvals = tuple()
         fsum = sum([f(*xs) for f in self._functions])
-        msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._isproduction[idx]])
-        return (msum + fsum) / (sum(self._isproduction) + len(self._functions))
-        
-    def function_wrapper(self, *cfields): # wrap MB around some function f with cvals data from cfields
+        msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if model.quality])
+        return (msum + fsum) / (self._count_quality_models() + len(self._functions))
+    
+    def add_dataset(self, x, y, kind='tdata'): # training (default)or evaluation
+        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
+        eval('self._'+ kind)['inputs'] += x
+        eval('self._'+ kind)['outputs'] += y
+    
+    def add_function(self, fn=None):
+        if fn == None: # add the original unwrapped host function
+            fn = self._host
+        self._functions.append(fn)
+        return len(self._functions) - 1 # return index of the added function
+    
+    def add_model(self, model):
+        self._models.append(model)
+        model.quality = False
+        self.print('After adding a model, but before training it')
+        idx = len(self._models) - 1
+        self.train(idx)
+        return idx
+
+    def function_wrap(self, *cfields): # wrap MB around some function f with cvals data from cfields
         def decorator(f):
             def wrapper(*xs):
-                self.host = f
+                self._host = f
                 cvals = self._cvals(*cfields)
-                if self._state == 'connected':
-                    y = f(*xs)
+                if self._call_state == 'host':
+                    y = f(*xs)  # call only host
                     y = self._get_feedback(y, *xs, cvals=cvals)
-                elif self._state == 'production':
-                    y = (self(*xs, cvals=cvals) + f(*xs))[0] / 2
+                elif self._call_state == 'MB': # no feedback
+                    y = self(*xs, cvals=cvals)[0] # call only MB
+                else: # self._call_state == 'both': 
+                    y = (self(*xs, cvals=cvals) + f(*xs))[0] / 2 # call both host and MB
                     y = self._get_feedback(y, *xs, cvals=cvals)
-                else: # self._state == 'embedded'
-                    y = self(*xs, cvals=cvals)[0]
                 kind = self._add_data(y, *xs, *cvals)
-                return FloatCallback(y, self._callback(kind, *xs, *cvals))
+                return FloatCallback(y, self._callback(kind, *xs, *cvals)) # y must be int or float
             return wrapper
         return decorator   
+    
+    def get_call_state(self):
+        return self._call_state
+    
+    def get_model_quality(self, idx):
+        return self._models[idx].quality
+    
+    def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
+        print(f"{tag}: state:{self._call_state}, #functions:{len(self._functions)}, model-qualities:{[m.quality for m in self._models]}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{roundl(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{roundl(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{roundl(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{roundl(self._edata['outputs'][-ntail:])})")
+    
+    def remove_dataset(self, kind='tdata'):
+        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
+        eval('self._'+ kind)['inputs'] = []
+        eval('self._'+ kind)['outputs'] = []
+    
+    def remove_function(self, idx):
+        self._functions.pop(idx)
+    
+    def remove_model(self, idx):
+        self._models.pop(idx)
 
-    def sensor_wrapper(self, kind='direct'): # wrap a sensor around some function g
+    def sensor_wrap(self, skind='direct'): # wrap a sensor around some function g
         def decorator(g): # add other sensors as needed
             def direct(*xs): # direct sensor
                 y = g(*xs)
@@ -63,88 +110,52 @@ class ModelBox(): # main MB class
                 xfirst = g(*yxs)
                 self._add_data(yxs[0], xfirst, *yxs[1:])
                 return xfirst
-            return eval(kind)
-        assert kind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
+            return eval(skind)  # correct kind of sensor
+        assert skind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
         return decorator
     
-    def add_model(self, model):
-        self._models.append(model)
-        self._isproduction.append(False)
-        self.print('After adding a model, but before training it')
-        return self.train(len(self._models) - 1)
-
-    def remove_model(self, idx):
-        self._models.pop(idx)
-        self._isproduction.pop(idx)
+    def set_call_state(self, newstate):
+        assert newstate in ['host', 'both', 'MB'], "call_state must be 'host', 'both' or 'MB'"
+        self._call_state = newstate 
+    
+    def test(self, idx):
+        if self._edata['inputs'] == []:
+            return False
+        model = self._models[idx]
+        score = model.score(self._edata['inputs'], self._edata['outputs'])
+        res = score >= self.acc_threshold
+        print(f"Compare Model {idx} score = {score} with acc_threshold {self.acc_threshold} => quality = {res}")
+        model.quality = res
+        self._auto_call_state()
+        return res
+    
+    def test_all(self):
+        for idx in range(len(self._models)):
+            self.test(idx)
 
     def train(self, idx):
         self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
         return self.test(idx)
 
-    def test(self, idx):
-        if self._edata['inputs'] == []:
-            return False
-        score = self._models[idx].score(self._edata['inputs'], self._edata['outputs'])
-        res = score >= self.pmaccuracy
-        print(f"Compare Model {idx} score = {score} with pmaccuracy {self.pmaccuracy} => production = {res}")
-        self._isproduction[idx] = res
-        production = sum(self._isproduction)
-        if production == 0: 
-            self._state = 'connected'
-        elif self._state == 'connected': 
-            self._state = 'production'
-        return res
-
     def train_all(self):
         for idx in range(len(self._models)):
             self.train(idx)
-
-    def test_all(self):
-        for idx in range(len(self._models)):
-            self.test(idx)
-
-    def embed(self):
-        self._functions.append(self.host)
-        self._state = 'embedded' 
-
-    def add_dataset(self, x, y, kind='tdata'):
-        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self._'+ kind)['inputs'] += x
-        eval('self._'+ kind)['outputs'] += y
-
-    def remove_dataset(self, kind='tdata'):
-        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self._'+ kind)['inputs'] = []
-        eval('self._'+ kind)['outputs'] = []
-
-    def add_function(self, fn):
-        self._functions.append(fn)
-
-    def remove_function(self, idx):
-        self._functions.pop(idx)
-
-    def _get_feedback(self, y, *xs, cvals=None):
-        if cvals == None:
-            cvals = tuple()
-        if random() <= self.feedback_fraction:
-            newy = input(f"x={roundl(list(xs))}, context={roundl(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
-            if newy != '':  
-                return float(newy)
-        return y 
-
-    def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
-        print(f"{tag}: state:{self._state}, #functions:{len(self._functions)}, #models:{len(self._models)}, production:{self._isproduction}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{roundl(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{roundl(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{roundl(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{roundl(self._edata['outputs'][-ntail:])})")
      
     def _add_data(self, y, *xs):
-        if random() <= self.edata_fraction: # cache as evaluation data
+        if random() <= self.edata_fraction: # save as evaluation data
             self._edata['inputs'].append(list(xs))
             self._edata['outputs'].append(y)
             return 'edata'
-        else:
-            self._tdata['inputs'].append(list(xs))
-            self._tdata['outputs'].append(y)
-            return 'tdata'
-                   
+        self._tdata['inputs'].append(list(xs))
+        self._tdata['outputs'].append(y)
+        return 'tdata'
+    
+    def _auto_call_state(self):
+        if self._count_quality_models() == 0: 
+            self._call_state = 'host'
+        elif self._call_state == 'host': 
+            self._call_state = 'both'
+                         
     def _callback(self, kind, *args):
         def inner(y):
             nonlocal self, kind, args
@@ -153,8 +164,11 @@ class ModelBox(): # main MB class
             return y
         return inner
     
+    def _count_quality_models(self):
+        return sum([m.quality for m in self._models])
+ 
     @staticmethod
-    def _cvals(*cfields):
+    def _cvals(*cfields): # get cfield values from the context
         try:
             frame = inspect.currentframe().f_back
             all_variables = {**frame.f_globals, **frame.f_locals}
@@ -162,6 +176,15 @@ class ModelBox(): # main MB class
             return cvals
         finally:
             del frame
+         
+    def _get_feedback(self, y, *xs, cvals=None):
+        if cvals == None:
+            cvals = tuple()
+        if random() <= self.feedback_fraction:
+            newy = input(f"x={roundl(list(xs))}, context={roundl(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
+            if newy != '':  
+                return float(newy)
+        return y     
 
 def generate_data(f, count=1000, scale=100):
     global globalx
@@ -187,7 +210,7 @@ def roundl(xl, places=0):
     return round(xl, places)
 
 mb = ModelBox()
-@mb.function_wrapper('globalx')
+@mb.function_wrap('globalx')
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
@@ -201,18 +224,18 @@ mb.print('After training and testing the added model')
 repeat_function(f)
 mb.print('After a few more function calls')
 
-if mb._state == 'production': 
-    mb.embed()
+if mb.get_call_state() == 'both': 
+    mb.set_call_state('MB')
     mb.print('After embedding')
     repeat_function(f)
     mb.print('After a few more function calls')
 
-mb.add_model(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
+midx = mb.add_model(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
 mb.print('After training and testing the added model')
 repeat_function(f)
 mb.print('After a few more function calls')
 
-if mb._state == 'embedded':
+if mb.get_call_state() == 'MB':
     xy = generate_data(f)
     mb.add_dataset(xy[0], xy[1])
     mb.print('After adding more data but before training')
@@ -221,8 +244,8 @@ if mb._state == 'embedded':
     repeat_function(f)
     mb.print('After a few more function calls')
 
-if mb._isproduction[1] == False:
-    mb.pmaccuracy = -100
+if mb.get_model_quality(midx) == False:
+    mb.acc_threshold = -100
     mb.print('After updating threshold')
     mb.test_all()
     mb.print('After retesting all models with the new threshold')
@@ -230,7 +253,7 @@ if mb._isproduction[1] == False:
     mb.print('After a few more function calls')
 
 mb.remove_model(1)
-mb.pmaccuracy = 0.95
+mb.acc_threshold = 0.95
 mb.print('After removing the second model and reverting the threshold')
 
 mb.add_function(lambda x: x * x)
@@ -244,14 +267,14 @@ mb.print('After removing all data')
 repeat_function(f)
 mb.print('After a few more function calls')
 
-@mb.sensor_wrapper()
+@mb.sensor_wrap()
 def fcopy(x0, x1, x3):  # y
     return 3 * x0 + x1 + x3
 
 repeat_function(fcopy, arity=3)
 mb.print('After a few direct-sensor calls')
 
-@mb.sensor_wrapper('inverse')
+@mb.sensor_wrap('inverse')
 def finv(y, x1, x2):  # x1
     return (y - x1 -  x2) / 3
 
