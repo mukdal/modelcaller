@@ -2,6 +2,7 @@
 
 import inspect
 from random import random
+from dataclasses import dataclass
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 import warnings
@@ -16,19 +17,31 @@ class CallbackBase: # for adding callbacks to objects w/o dynamic attributes
     def __getattr__(self, item): # delegate any attribute not defined here to the value
         return getattr(self.value, item)
     
-class FloatCallback(CallbackBase, float):
+class FloatCallback(CallbackBase, float): # for floats (and ints)
     def __new__(cls, value, callback):
         assert isinstance(value, float) or isinstance(value, int), "non-float/int value passed to FloatCallback"
         obj = float.__new__(cls, value)  # Create a float instance
         obj.callback = callback  # Assign the callback directly to this float instance
         return obj
-    
+
+@dataclass
+class MBConfig: # default MB configuration
+    auto_cache = True # auto cache host call data?
+    auto_test = True # auto test after training a model?
+    auto_train = True # auto train after adding a model?
+    edata_fraction = 0.3 # fraction of data cached for evaluation (instead of training)
+    feedback_fraction = 0.1 # fraction of host calls randomly chosen for feedback
+    qlty_threshold = 0.95 # quality (accuracy) threshold for models
+
 class ModelBox(): # main MB class
-    def __init__(self):
+    def __init__(self, mbconfig=MBConfig()):
         super().__init__()
-        self.acc_threshold = 0.95 # accuracy threshold for calling models when MB is called 
-        self.edata_fraction = 0.3 # fraction of cached data randomly chosen for evaluation
-        self.feedback_fraction = 0.1 # fraction of host calls randomly chosen for feedback from users
+        self.auto_cache = mbconfig.auto_cache
+        self.auto_test = mbconfig.auto_test
+        self.auto_train = mbconfig.auto_train
+        self.edata_fraction = mbconfig.edata_fraction 
+        self.feedback_fraction = mbconfig.feedback_fraction 
+        self.qlty_threshold =  mbconfig.qlty_threshold 
         self._call_state = 'host' # host, MB, both : who to call when the host fn is called?
         self._edata = {'inputs': [], 'outputs': []}  # saved evaluation data
         self._functions = [] # list of functions
@@ -59,9 +72,20 @@ class ModelBox(): # main MB class
         model.quality = False
         self.print('After adding a model, but before training it')
         idx = len(self._models) - 1
-        self.train(idx)
+        if self.auto_train:
+            self.train(idx)
         return idx
 
+    def find_data(self, x, kind='tdata'):
+        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
+        try:
+            idx = eval('self._'+ kind)['inputs'].index(x)
+            y = eval('self._'+ kind)['outputs'][idx]
+        except:
+            idx = -1
+            y = None
+        return idx, y
+    
     def function_wrap(self, *cfields): # wrap MB around some function f with cvals data from cfields
         def decorator(f):
             def wrapper(*xs):
@@ -75,8 +99,10 @@ class ModelBox(): # main MB class
                 else: # self._call_state == 'both': 
                     y = (self(*xs, cvals=cvals) + f(*xs))[0] / 2 # call both host and MB
                     y = self._get_feedback(y, *xs, cvals=cvals)
-                kind = self._add_data(y, *xs, *cvals)
-                return FloatCallback(y, self._callback(kind, *xs, *cvals)) # y must be int or float
+                if self.auto_cache:
+                    kind = self._add_data(y, *xs, *cvals)
+                    y = FloatCallback(y, self._callback(kind, *xs, *cvals)) # y must be int or float
+                return y 
             return wrapper
         return decorator   
     
@@ -89,6 +115,11 @@ class ModelBox(): # main MB class
     def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
         print(f"{tag}: state:{self._call_state}, #functions:{len(self._functions)}, model-qualities:{[m.quality for m in self._models]}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{roundl(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{roundl(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{roundl(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{roundl(self._edata['outputs'][-ntail:])})")
     
+    def remove_data(self, idx, kind='tdata'):
+        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
+        eval('self._'+ kind)['inputs'].pop(idx)
+        eval('self._'+ kind)['outputs'].pop(idx)
+        
     def remove_dataset(self, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
         eval('self._'+ kind)['inputs'] = []
@@ -118,28 +149,33 @@ class ModelBox(): # main MB class
         assert newstate in ['host', 'both', 'MB'], "call_state must be 'host', 'both' or 'MB'"
         self._call_state = newstate 
     
-    def test(self, idx):
+    def test(self, idx, all=False):
         if self._edata['inputs'] == []:
             return False
         model = self._models[idx]
         score = model.score(self._edata['inputs'], self._edata['outputs'])
-        res = score >= self.acc_threshold
-        print(f"Compare Model {idx} score = {score} with acc_threshold {self.acc_threshold} => quality = {res}")
+        res = score >= self.qlty_threshold
+        print(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
         model.quality = res
-        self._auto_call_state()
+        if not all:  # not testing all models
+            self._auto_call_state()
         return res
     
     def test_all(self):
         for idx in range(len(self._models)):
-            self.test(idx)
+            self.test(idx, all=True)
+        self._auto_call_state()
 
-    def train(self, idx):
+    def train(self, idx, all=False):
         self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
-        return self.test(idx)
+        if not all and self.auto_test:
+            self.test(idx)
 
     def train_all(self):
         for idx in range(len(self._models)):
-            self.train(idx)
+            self.train(idx, all=True)
+        if self.auto_test:
+            self.test_all()
      
     def _add_data(self, y, *xs):
         if random() <= self.edata_fraction: # save as evaluation data
@@ -245,7 +281,7 @@ if mb.get_call_state() == 'MB':
     mb.print('After a few more function calls')
 
 if mb.get_model_quality(midx) == False:
-    mb.acc_threshold = -100
+    mb.qlty_threshold = -100
     mb.print('After updating threshold')
     mb.test_all()
     mb.print('After retesting all models with the new threshold')
@@ -253,7 +289,7 @@ if mb.get_model_quality(midx) == False:
     mb.print('After a few more function calls')
 
 mb.remove_model(1)
-mb.acc_threshold = 0.95
+mb.qlty_threshold = 0.95
 mb.print('After removing the second model and reverting the threshold')
 
 mb.add_function(lambda x: x * x)
@@ -285,7 +321,6 @@ globalx = 1
 y = f(2, 3)
 y.callback(100.0)
 for kind in ('tdata', 'edata'):
-    try:
-        idx = eval('mb._'+ kind)['inputs'].index([2, 3, 1])
-        print(f"Feedback callback: {y:.1f} updated to {eval('mb._'+ kind)['outputs'][idx]} in mb._{kind}['outputs'] for inputs [2, 3, 1]")
-    except: pass
+    idx, out = mb.find_data([2, 3, 1], kind)
+    if idx >= 0:
+        print(f"Feedback callback: {y:.1f} updated to {out} in _{kind}['outputs'][{idx}] for inputs [2, 3, 1]")
