@@ -6,128 +6,124 @@ from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 import warnings
 warnings.filterwarnings("ignore")
-globalx = 0
 
+class FloatCallback(float): # float with a callback function
+    def __new__(cls, value, callback):
+        obj = super().__new__(cls, value)
+        obj.function = callback
+        return obj
+    def callback(self, *args):
+        return self.function(*args)
+    
 class ModelBox(): # main MB class
     def __init__(self):
         super().__init__()
-        self.tdata = {'inputs': [], 'outputs': []}  # saved training data
-        self.edata = {'inputs': [], 'outputs': []}  # saved evaluation data
-        self.models = [] # list of models
-        self.isproduction = [] # production status of each model
-        self.functions = [] # list of functions
-        self.state = 'connected' # connected, production, embedded
+        self._tdata = {'inputs': [], 'outputs': []}  # saved training data
+        self._edata = {'inputs': [], 'outputs': []}  # saved evaluation data
+        self._models = [] # list of models
+        self._isproduction = [] # production status of each model
+        self._functions = [] # list of functions
+        self._state = 'connected' # connected, production, embedded
         self.pmaccuracy = 0.95 # accuracy threshold for production models; a non-embedded MB has production state iff at least one model has production status
         self.edata_fraction = 0.3 # fraction of cached data randomly chosen for evaluation
         self.feedback_fraction = 0.1 # fraction of calls randomly chosen for feedback from users
-
+        
     def __call__(self, *xs, cvals=None):
         if cvals == None:
             cvals = tuple()
-        fsum = sum([f(*xs) for f in self.functions])
-        msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self.models) if self.isproduction[idx]])
-        return (msum + fsum) / (sum(self.isproduction) + len(self.functions))
+        fsum = sum([f(*xs) for f in self._functions])
+        msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._isproduction[idx]])
+        return (msum + fsum) / (sum(self._isproduction) + len(self._functions))
         
-    def function_wrapper(self, *cfields): # wrap MB around some function f with context data from cfields
+    def function_wrapper(self, *cfields): # wrap MB around some function f with cvals data from cfields
         def decorator(f):
             def wrapper(*xs):
                 self.host = f
-                cvals = self.context(*cfields)
-                if self.state == 'connected':
+                cvals = self._cvals(*cfields)
+                if self._state == 'connected':
                     y = f(*xs)
-                    y = self.get_feedback(y, *xs, cvals=cvals)
-                elif self.state == 'production':
+                    y = self._get_feedback(y, *xs, cvals=cvals)
+                elif self._state == 'production':
                     y = (self(*xs, cvals=cvals) + f(*xs))[0] / 2
-                    y = self.get_feedback(y, *xs, cvals=cvals)
-                else: # self.state == 'embedded'
+                    y = self._get_feedback(y, *xs, cvals=cvals)
+                else: # self._state == 'embedded'
                     y = self(*xs, cvals=cvals)[0]
-                self.add_data(y, *xs, *cvals)
-                return y
+                kind = self._add_data(y, *xs, *cvals)
+                return FloatCallback(y, self._callback(kind, *xs, *cvals))
             return wrapper
-        return decorator
-    
+        return decorator   
+
     def sensor_wrapper(self, kind='direct'): # wrap a sensor around some function g
         def decorator(g): # add other sensors as needed
             def direct(*xs): # direct sensor
                 y = g(*xs)
-                self.add_data(y, *xs)
+                self._add_data(y, *xs)
                 return y
             def inverse(*yxs): # inverse sensor, yxs = (y, xs except xfirst)
                 xfirst = g(*yxs)
-                self.add_data(yxs[0], xfirst, *yxs[0:])
+                self._add_data(yxs[0], xfirst, *yxs[1:])
                 return xfirst
             return eval(kind)
         assert kind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
         return decorator
     
-    def add_data(self, y, *xs):
-        if random() <= self.edata_fraction: # cache as evaluation data
-            self.edata['inputs'].append(list(xs))
-            self.edata['outputs'].append(y)
-        else:
-            self.tdata['inputs'].append(list(xs))
-            self.tdata['outputs'].append(y)
-    
     def add_model(self, model):
-        self.models.append(model)
-        self.isproduction.append(False)
+        self._models.append(model)
+        self._isproduction.append(False)
         self.print('After adding a model, but before training it')
-        return self.train(len(self.models) - 1)
+        return self.train(len(self._models) - 1)
 
     def remove_model(self, idx):
-        self.models.pop(idx)
-        self.isproduction.pop(idx)
+        self._models.pop(idx)
+        self._isproduction.pop(idx)
 
     def train(self, idx):
-        self.models[idx].fit(self.tdata['inputs'], self.tdata['outputs'])
+        self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
         return self.test(idx)
 
     def test(self, idx):
-        if self.edata['inputs'] == []:
+        if self._edata['inputs'] == []:
             return False
-        score = self.models[idx].score(self.edata['inputs'], self.edata['outputs'])
+        score = self._models[idx].score(self._edata['inputs'], self._edata['outputs'])
         res = score >= self.pmaccuracy
         print(f"Compare Model {idx} score = {score} with pmaccuracy {self.pmaccuracy} => production = {res}")
-        self.isproduction[idx] = res
-        production = sum(self.isproduction)
+        self._isproduction[idx] = res
+        production = sum(self._isproduction)
         if production == 0: 
-            self.state = 'connected'
-        elif self.state == 'connected': 
-            self.state = 'production'
+            self._state = 'connected'
+        elif self._state == 'connected': 
+            self._state = 'production'
         return res
 
     def train_all(self):
-        for idx in range(len(self.models)):
+        for idx in range(len(self._models)):
             self.train(idx)
 
     def test_all(self):
-        for idx in range(len(self.models)):
+        for idx in range(len(self._models)):
             self.test(idx)
 
-    def productionize(self):
-        self.state = 'production' 
-
     def embed(self):
-        self.functions.append(self.host)
-        self.state = 'embedded' 
+        self._functions.append(self.host)
+        self._state = 'embedded' 
 
     def add_dataset(self, x, y, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self.'+ kind)['inputs'] += x
-        eval('self.'+ kind)['outputs'] += y
+        eval('self._'+ kind)['inputs'] += x
+        eval('self._'+ kind)['outputs'] += y
 
     def remove_dataset(self, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self.'+ kind)['inputs'] = []
-        eval('self.'+ kind)['outputs'] = []
+        eval('self._'+ kind)['inputs'] = []
+        eval('self._'+ kind)['outputs'] = []
 
     def add_function(self, fn):
-        self.functions.append(fn)
+        self._functions.append(fn)
 
     def remove_function(self, idx):
-        self.functions.pop(idx)
+        self._functions.pop(idx)
 
-    def get_feedback(self, y, *xs, cvals=None):
+    def _get_feedback(self, y, *xs, cvals=None):
         if cvals == None:
             cvals = tuple()
         if random() <= self.feedback_fraction:
@@ -137,10 +133,28 @@ class ModelBox(): # main MB class
         return y 
 
     def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
-        print(f"{tag}: state:{self.state}, #functions:{len(self.functions)}, #models:{len(self.models)}, production:{self.isproduction}, #tdata:{len(self.tdata['inputs'])}, #edata:{len(self.edata['inputs'])}; tinputs:{'...' if len(self.tdata['inputs']) > ntail  else ''}{roundl(self.tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self.tdata['outputs']) > ntail else ''}{roundl(self.tdata['outputs'][-ntail:])}; einputs:{'...' if len(self.edata['inputs']) > ntail  else ''}{roundl(self.edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self.edata['outputs']) > ntail else ''}{roundl(self.edata['outputs'][-ntail:])})")
-
+        print(f"{tag}: state:{self._state}, #functions:{len(self._functions)}, #models:{len(self._models)}, production:{self._isproduction}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{roundl(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{roundl(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{roundl(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{roundl(self._edata['outputs'][-ntail:])})")
+     
+    def _add_data(self, y, *xs):
+        if random() <= self.edata_fraction: # cache as evaluation data
+            self._edata['inputs'].append(list(xs))
+            self._edata['outputs'].append(y)
+            return 'edata'
+        else:
+            self._tdata['inputs'].append(list(xs))
+            self._tdata['outputs'].append(y)
+            return 'tdata'
+                   
+    def _callback(self, kind, *args):
+        def inner(y):
+            nonlocal self, kind, args
+            idx = eval('self._'+ kind)['inputs'].index(list(args))
+            eval('self._'+ kind)['outputs'][idx] = y
+            return y
+        return inner
+    
     @staticmethod
-    def context(*cfields):
+    def _cvals(*cfields):
         try:
             frame = inspect.currentframe().f_back
             all_variables = {**frame.f_globals, **frame.f_locals}
@@ -187,7 +201,7 @@ mb.print('After training and testing the added model')
 repeat_function(f)
 mb.print('After a few more function calls')
 
-if mb.state == 'production': 
+if mb._state == 'production': 
     mb.embed()
     mb.print('After embedding')
     repeat_function(f)
@@ -198,7 +212,7 @@ mb.print('After training and testing the added model')
 repeat_function(f)
 mb.print('After a few more function calls')
 
-if mb.state == 'embedded':
+if mb._state == 'embedded':
     xy = generate_data(f)
     mb.add_dataset(xy[0], xy[1])
     mb.print('After adding more data but before training')
@@ -207,7 +221,7 @@ if mb.state == 'embedded':
     repeat_function(f)
     mb.print('After a few more function calls')
 
-if mb.isproduction[1] == False:
+if mb._isproduction[1] == False:
     mb.pmaccuracy = -100
     mb.print('After updating threshold')
     mb.test_all()
@@ -243,3 +257,12 @@ def finv(y, x1, x2):  # x1
 
 repeat_function(finv, arity=3)
 mb.print('After a few inverse-sensor calls')
+
+globalx = 1
+y = f(2, 3)
+y.callback(100.0)
+for kind in ('tdata', 'edata'):
+    try:
+        idx = eval('mb._'+ kind)['inputs'].index([2, 3, 1])
+        print(f"Feedback callback: {y:.1f} updated to {eval('mb._'+ kind)['outputs'][idx]} in mb._{kind}['outputs'] for inputs [2, 3, 1]")
+    except: pass
