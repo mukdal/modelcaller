@@ -2,6 +2,7 @@
 
 import inspect
 import random
+import numpy as np
 from dataclasses import dataclass
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
@@ -45,13 +46,13 @@ class ModelBox(): # main MB class
         self.feedback_fraction = mbconfig.feedback_fraction 
         self.qlty_threshold =  mbconfig.qlty_threshold 
         self._call_target = 'MB' # MB, host, both : who to call when MB or the wrapped fn is called?
-        self._edata = {'inputs': [], 'outputs': []}  # saved evaluation data
+        self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
         self._host = None   # original unwrapped host function (gets populated by function_wrap)
         self._models = [] # list of models (same number of args)
         self._ncargs = mbconfig._ncargs 
         self._qualities = [] # list of model qualities
-        self._tdata = {'inputs': [], 'outputs': []}  # saved training data
+        self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
     def __call__(self, *xs, plugin=False, cvals=None):
         if cvals == None: cvals = tuple() # standard python hack
@@ -59,15 +60,16 @@ class ModelBox(): # main MB class
             xs, cvals = xs[:-self._ncargs], xs[-self._ncargs:] # split xs
         fsum = sum([f(*xs) for f in self._functions])
         msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._qualities[idx]])
-        res = (msum + fsum)[0] / (sum(self._qualities) + len(self._functions))
+        res = (msum[0] + fsum) / (sum(self._qualities) + len(self._functions))
         if not plugin: # called directly, instead of a host function wrapper
-            self._process_result(y, xs, cvals)
+            res = self._process_result(res, xs, cvals)
         return res
     
-    def add_dataset(self, x, y, kind='tdata'): # training (default)or evaluation
+    def add_dataset(self, npx, npy, kind='tdata'): # training (default) or evaluation
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self._'+ kind)['inputs'] += x
-        eval('self._'+ kind)['outputs'] += y
+        data = eval('self._'+ kind)
+        data['inputs'] = np.concatenate((data['inputs'], npx), axis=0) if data['inputs'].size else npx
+        data['outputs'] = np.concatenate((data['outputs'], npy), axis=0) if data['outputs'].size else npy
     
     def add_function(self, fn=None):
         if fn == None: # add the original unwrapped host function
@@ -86,12 +88,9 @@ class ModelBox(): # main MB class
 
     def find_data(self, x, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        try:
-            idx = eval('self._'+ kind)['inputs'].index(x)
-            y = eval('self._'+ kind)['outputs'][idx]
-        except:
-            idx = -1
-            y = None
+        data = eval('self._'+ kind)
+        idx = self._npindex(data['inputs'], x)
+        y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
     
     def function_wrap(self, *cargs): # wrap MB around some function f with cvals data from cargs
@@ -131,17 +130,19 @@ class ModelBox(): # main MB class
         return idx
     
     def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
-        print(f"{tag}: call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{roundl(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{roundl(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{roundl(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{roundl(self._edata['outputs'][-ntail:])}")
+        print(f"{tag}: call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
     
     def remove_data(self, idx, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self._'+ kind)['inputs'].pop(idx)
-        eval('self._'+ kind)['outputs'].pop(idx)
+        data = eval('self._'+ kind)
+        data('self._'+ kind)['inputs'].pop(idx)
+        data('self._'+ kind)['outputs'].pop(idx)
         
     def remove_dataset(self, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        eval('self._'+ kind)['inputs'] = []
-        eval('self._'+ kind)['outputs'] = []
+        data = eval('self._'+ kind)
+        data['inputs'] = np.array([])
+        data['outputs'] = np.array([])
     
     def remove_function(self, idx):
         self._functions.pop(idx)
@@ -172,7 +173,7 @@ class ModelBox(): # main MB class
             self._call_target = newstate 
     
     def test(self, idx, all=False):
-        if self._edata['inputs'] == []:
+        if self._edata['inputs'].size == 0:
             return False
         model = self._models[idx]
         score = model.score(self._edata['inputs'], self._edata['outputs'])
@@ -184,32 +185,41 @@ class ModelBox(): # main MB class
         return res
     
     def test_all(self):
-        if self._edata['inputs'] != []:
+        if self._edata['inputs'].size > 0:
             for idx in range(len(self._models)):
                 self.test(idx, all=True)
             self._auto_call_target()
 
     def train(self, idx, all=False):
-        if self._tdata['inputs'] != []:
+        if self._tdata['inputs'].size > 0:  
             self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
-            if not all and self.auto_test:
+            if not all and hasattr(self, 'auto_test') and self.auto_test:
                 self.test(idx)
 
     def train_all(self):
-        if self._tdata['inputs'] != []:
+        if self._tdata['inputs'].size > 0:
             for idx in range(len(self._models)):
                 self.train(idx, all=True)
             if self.auto_test:
                 self.test_all()
      
     def _add_data(self, y, *xs):
-        if random.random() <= self.edata_fraction: # save as evaluation data
-            self._edata['inputs'].append(list(xs))
-            self._edata['outputs'].append(y)
-            return 'edata'
-        self._tdata['inputs'].append(list(xs))
-        self._tdata['outputs'].append(y)
-        return 'tdata'
+        kind = 'edata' if random.random() <= self.edata_fraction else 'tdata'
+        data = eval('self._'+ kind)
+        xs_np = np.array(xs).reshape(1, -1)  # Reshape xs to a 2D array with one row
+        y_np = np.array([y])  # Make y a 1D array with a single element
+        if data['inputs'].size == 0:
+            data['inputs'] = xs_np
+            data['outputs'] = y_np
+        else:
+            data['inputs'] = np.concatenate((data['inputs'], xs_np), axis=0)
+            data['outputs'] = np.concatenate((data['outputs'], y_np), axis=0)
+        return kind
+    
+    def _around(self, xl, places=1):
+        if type(xl) in (list, tuple): 
+            return [self._around(x, places) for x in xl]
+        return np.around(xl, places) 
     
     def _auto_call_target(self):
         if sum(self._qualities) == 0: 
@@ -220,9 +230,13 @@ class ModelBox(): # main MB class
     def _callback(self, kind, *args):
         def inner(y):
             nonlocal self, kind, args
-            idx = eval('self._'+ kind)['inputs'].index(list(args))
-            eval('self._'+ kind)['outputs'][idx] = y
-            return y
+            data = eval('self._'+ kind)
+            idx = self._npindex(data['inputs'], *args)
+            if idx >= 0:
+                data['outputs'][idx] = y
+                return y
+            else:
+                print("Warning: feedback callback couldn't find the inputs", args, "in", kind)
         return inner
  
     @staticmethod
@@ -238,11 +252,25 @@ class ModelBox(): # main MB class
     def _get_feedback(self, y, *xs, cvals=None):
         if cvals == None: cvals = tuple() # standard python hack
         if random.random() <= self.feedback_fraction:
-            newy = input(f"x={roundl(list(xs))}, context={roundl(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
+            newy = input(f"x={self._around(list(xs))}, context={self._around(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
             if newy != '':  
                 return float(newy)
         return y  
-
+   
+    @staticmethod
+    def _npindex(data, *key): # find row index of first match, else -1
+        if data.size == 0: 
+            return -1
+        npkey = np.array(key)
+        matches = np.all(data == npkey, axis=1)
+        idxs = np.where(matches)[0]
+        if idxs.size > 0:
+            return idxs[0]
+        return -1
+     
+    def _npp(self, arr):
+        return '[' + ', '.join([str(row.tolist()) for row in self._around(arr)]) + ']'
+    
     def _process_result(self, y, xs, cvals=None):   
         if cvals == None: cvals = tuple() # standard python hack
         y = self._get_feedback(y, *xs, cvals=cvals)
@@ -253,13 +281,14 @@ class ModelBox(): # main MB class
     
 def generate_data(f, count=1000, scale=100):
     global globalx
-    inputs, outputs = [], []
-    for _ in range(count):
+    inputs = np.zeros((count, 3))
+    outputs = np.zeros(count)
+    for i in range(count):
         globalx = random.random() * scale
         x0 = random.random() * scale
         x1 = random.random() * scale
-        inputs.append([x0, x1, globalx])
-        outputs.append(f(x0, x1))
+        inputs[i] = [x0, x1, globalx]
+        outputs[i] = f(x0, x1)
     return inputs, outputs
 
 def repeat_function(f, arity=2, count=10, scale=100):
@@ -269,18 +298,13 @@ def repeat_function(f, arity=2, count=10, scale=100):
         args = [random.random() * scale for _ in range(arity)]
         f(*args)
 
-def roundl(xl, places=0):
-    if type(xl) in (list, tuple): 
-        return [roundl(x, places) for x in xl]
-    return round(xl, places)
-
 mb = ModelBox()
 @mb.function_wrap('globalx')
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
 
-mb.print('Intial MB: mb')
+mb.print('Intial mb, a new MB')
 repeat_function(f)
 mb.print('After a few function calls')
 
@@ -357,8 +381,14 @@ for kind in ('tdata', 'edata'):
 repeat_function(mb, arity=3)
 mb.print('After a few direct mb calls')
 
+globalx = 1
+y = f(2, 3)
+mb.remove_dataset('tdata')
+mb.remove_dataset('edata')
+y.callback(100.0)
+
 mb1 = ModelBox(MBConfig(_ncargs=1))
-mb1.print('mb1, a new MB')
+mb1.print('Initial mb1, a new MB')
 mb1.add_model(mb.get_model(0), quality=True) # reuse model
 repeat_function(mb1, arity=3)
 mb1.print('After a few mb1 calls')
