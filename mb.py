@@ -1,4 +1,4 @@
-"""mb.py. Copyright (C) 2024, Mukesh Dalal <mukesh.dalal@gmail.com>"""
+"""mc.py. Copyright (C) 2024, Mukesh Dalal <mukesh.dalal@gmail.com>"""
 
 import inspect
 import random
@@ -27,7 +27,7 @@ class FloatCallback(CallbackBase, float): # for floats (and ints)
         return obj
 
 @dataclass
-class MBConfig: # default MB configuration
+class MCconfig: # default MC configuration
     auto_cache: bool = True # auto cache host call data?
     auto_test: bool = True # auto test after training a model?
     auto_train: bool = True # auto train after adding a model?
@@ -36,21 +36,21 @@ class MBConfig: # default MB configuration
     qlty_threshold: float = 0.95 # quality (accuracy) threshold for models
     _ncargs: int = 0 # number of context args (model args = function args + context args)
 
-class ModelBox(): # main MB class
-    def __init__(self, mbconfig=MBConfig()):
+class ModelCaller(): # main MC class
+    def __init__(self, mcconfig=MCconfig()):
         super().__init__()
-        self.auto_cache = mbconfig.auto_cache
-        self.auto_test = mbconfig.auto_test
-        self.auto_train = mbconfig.auto_train
-        self.edata_fraction = mbconfig.edata_fraction 
-        self.feedback_fraction = mbconfig.feedback_fraction 
-        self.qlty_threshold =  mbconfig.qlty_threshold 
-        self._call_target = 'MB' # MB, host, both : who to call when MB or the wrapped fn is called?
+        self.auto_cache = mcconfig.auto_cache
+        self.auto_test = mcconfig.auto_test
+        self.auto_train = mcconfig.auto_train
+        self.edata_fraction = mcconfig.edata_fraction 
+        self.feedback_fraction = mcconfig.feedback_fraction 
+        self.qlty_threshold =  mcconfig.qlty_threshold 
+        self._call_target = 'MC' # MC, host, both : who to call when MC or the wrapped fn is called?
         self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
         self._host = None   # original unwrapped host function (gets populated by function_wrap)
         self._models = [] # list of models (same number of args)
-        self._ncargs = mbconfig._ncargs 
+        self._ncargs = mcconfig._ncargs 
         self._qualities = [] # list of model qualities
         self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
@@ -93,18 +93,18 @@ class ModelBox(): # main MB class
         y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
     
-    def function_wrap(self, *cargs): # wrap MB around some function f with cvals data from cargs
+    def function_wrap(self, *cargs): # wrap MC around some function f with cvals data from cargs
         def decorator(f):
             def wrapper(*xs):
                 self._host = f
                 self._ncargs = len(cargs)
                 cvals = self._cvals(*cargs)
-                if self._call_target == 'MB':
-                    y = self(*xs, plugin=True, cvals=cvals) # call only MB
+                if self._call_target == 'MC':
+                    y = self(*xs, plugin=True, cvals=cvals) # call only MC
                 elif self._call_target == 'host':
                     y = f(*xs)  # call only host
                 else: # self._call_target == 'both': 
-                    y = (self(*xs, plugin=True, cvals=cvals) + f(*xs)) / 2 # call both host and MB
+                    y = (self(*xs, plugin=True, cvals=cvals) + f(*xs)) / 2 # call both host and MC
                 y = self._process_result(y, xs, cvals=cvals)
                 return y 
             return wrapper
@@ -125,11 +125,11 @@ class ModelBox(): # main MB class
     
     def merge_host(self):
         assert self._host != None, "no host function to merge"
-        idx = mb.add_function(mb.get_host())
-        mb.set_call_target('MB')
+        idx = mc.add_function(mc.get_host())
+        mc.set_call_target('MC')
         return idx
     
-    def print(self, tag, ntail=2): # print tag string and then MB with ntail inputs and outputs
+    def print(self, tag, ntail=2): # print tag string and then MC with ntail inputs and outputs
         print(f"{tag}: call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
     
     def remove_data(self, idx, kind='tdata'):
@@ -166,8 +166,8 @@ class ModelBox(): # main MB class
         return decorator
     
     def set_call_target(self, newstate):
-        assert newstate in ['host', 'both', 'MB'], "call_target must be 'host', 'both' or 'MB'"
-        if self._host == None and newstate != 'MB':
+        assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
+        if self._host == None and newstate != 'MC':
             print(f"Warning: can't set call_target to {newstate} because no host function")
         else:
             self._call_target = newstate 
@@ -298,97 +298,97 @@ def repeat_function(f, arity=2, count=10, scale=100):
         args = [random.random() * scale for _ in range(arity)]
         f(*args)
 
-mb = ModelBox()
-@mb.function_wrap('globalx')
+mc = ModelCaller()
+@mc.function_wrap('globalx')
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
 
-mb.print('Intial mb, a new MB')
+mc.print('Intial mc, a new MC')
 repeat_function(f)
-mb.print('After a few function calls')
+mc.print('After a few function calls')
 
-mb.add_model(LinearRegression())
-mb.print('After training and testing the added model')
+mc.add_model(LinearRegression())
+mc.print('After training and testing the added model')
 repeat_function(f)
-mb.print('After a few more function calls')
+mc.print('After a few more function calls')
 
-if mb.get_call_target() == 'both': 
-    mb.merge_host()
-    mb.print('After merging host function')
+if mc.get_call_target() == 'both': 
+    mc.merge_host()
+    mc.print('After merging host function')
     repeat_function(f)
-    mb.print('After a few more function calls')
+    mc.print('After a few more function calls')
 
-midx = mb.add_model(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
-mb.print('After training and testing the added model')
+midx = mc.add_model(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
+mc.print('After training and testing the added model')
 repeat_function(f)
-mb.print('After a few more function calls')
+mc.print('After a few more function calls')
 
-if mb.get_call_target() == 'MB':
-    xy = generate_data(mb.get_host())
-    mb.add_dataset(xy[0], xy[1])
-    mb.print('After adding more data but before training')
-    mb.train_all()
-    mb.print('After training and testing with the new data')
+if mc.get_call_target() == 'MC':
+    xy = generate_data(mc.get_host())
+    mc.add_dataset(xy[0], xy[1])
+    mc.print('After adding more data but before training')
+    mc.train_all()
+    mc.print('After training and testing with the new data')
     repeat_function(f)
-    mb.print('After a few more function calls')
+    mc.print('After a few more function calls')
 
-if mb.get_model_quality(midx) == False:
-    mb.qlty_threshold = -100
-    mb.print('After updating threshold')
-    mb.test_all()
-    mb.print('After retesting all models with the new threshold')
+if mc.get_model_quality(midx) == False:
+    mc.qlty_threshold = -100
+    mc.print('After updating threshold')
+    mc.test_all()
+    mc.print('After retesting all models with the new threshold')
     repeat_function(f)
-    mb.print('After a few more function calls')
+    mc.print('After a few more function calls')
 
-mb.remove_model(1)
-mb.qlty_threshold = 0.95
-mb.print('After removing the second model and reverting the threshold')
+mc.remove_model(1)
+mc.qlty_threshold = 0.95
+mc.print('After removing the second model and reverting the threshold')
 
-mb.add_function(lambda x: x * x)
-mb.print('After adding a new function')
+mc.add_function(lambda x: x * x)
+mc.print('After adding a new function')
 
-mb.remove_function(-1)
-mb.print('After removing the last function')
+mc.remove_function(-1)
+mc.print('After removing the last function')
 
-mb.remove_dataset()
-mb.print('After removing all training data')
+mc.remove_dataset()
+mc.print('After removing all training data')
 repeat_function(f)
-mb.print('After a few more function calls')
+mc.print('After a few more function calls')
 
-@mb.sensor_wrap()
+@mc.sensor_wrap()
 def fcopy(x0, x1, x3):  # y
     return 3 * x0 + x1 + x3
 
 repeat_function(fcopy, arity=3)
-mb.print('After a few direct-sensor calls')
+mc.print('After a few direct-sensor calls')
 
-@mb.sensor_wrap('inverse')
+@mc.sensor_wrap('inverse')
 def finv(y, x1, x2):  # x1
     return (y - x1 -  x2) / 3
 
 repeat_function(finv, arity=3)
-mb.print('After a few inverse-sensor calls')
+mc.print('After a few inverse-sensor calls')
 
 globalx = 1
 y = f(2, 3)
 y.callback(100.0)
 for kind in ('tdata', 'edata'):
-    idx, out = mb.find_data([2, 3, 1], kind)
+    idx, out = mc.find_data([2, 3, 1], kind)
     if idx >= 0:
         print(f"Feedback callback: {y:.1f} updated to {out} in _{kind}['outputs'][{idx}] for inputs [2, 3, 1]")
 
-repeat_function(mb, arity=3)
-mb.print('After a few direct mb calls')
+repeat_function(mc, arity=3)
+mc.print('After a few direct mc calls')
 
 globalx = 1
 y = f(2, 3)
-mb.remove_dataset('tdata')
-mb.remove_dataset('edata')
+mc.remove_dataset('tdata')
+mc.remove_dataset('edata')
 y.callback(100.0)
 
-mb1 = ModelBox(MBConfig(_ncargs=1))
-mb1.print('Initial mb1, a new MB')
-mb1.add_model(mb.get_model(0), quality=True) # reuse model
-repeat_function(mb1, arity=3)
-mb1.print('After a few mb1 calls')
+mc1 = ModelCaller(MCconfig(_ncargs=1))
+mc1.print('Initial mc1, a new MC')
+mc1.add_model(mc.get_model(0), quality=True) # reuse model
+repeat_function(mc1, arity=3)
+mc1.print('After a few mc1 calls')
