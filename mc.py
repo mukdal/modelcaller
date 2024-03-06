@@ -17,7 +17,7 @@ class CallbackBase: # for adding callbacks to objects w/o dynamic attributes
     def callback(self, *args, **kwargs):
         return self.cbfn(*args, **kwargs)
     def __getattr__(self, item): # delegate any attribute not defined here to the value
-        return getattr(self.value, item)
+        return getattr(self.value, item)    
     
 class FloatCallback(CallbackBase, float): # for floats (and ints)
     def __new__(cls, value, callback):
@@ -38,14 +38,13 @@ class ArrayCallback(CallbackBase, np.ndarray): # for arrays
 @dataclass
 class MCconfig: # default MC configuration
     auto_cache: bool = True # auto cache host call data?
-    auto_id: bool = False # automatically add MC id as a context arg; if None then only auto_id
+    auto_id: bool = False # automatically add MC id as the last context arg; if None then just thin MC with only auto_id
     auto_test: bool = True # auto test after training a model?
     auto_train: bool = True # auto train after adding a model?
     edata_fraction: float = 0.3 # fraction of data cached for evaluation (instead of training)
-    feedback_fraction: float = 0# 0.1 # fraction of host calls randomly chosen for feedback    
+    feedback_fraction: float = 0 #0.1 # fraction of host calls randomly chosen for feedback    
     qlty_threshold: float = 0.95 # quality (accuracy) threshold for models
-    _host: object = None
-    _ncargs: int = 0 # number of context args (model args = function args + context args)
+    _ncargs: int = 0 # number of context args, except id (model args = function args + context args)
 
 class ModelCaller(): # main MC class
     def __init__(self, mcc=MCconfig()):
@@ -57,30 +56,37 @@ class ModelCaller(): # main MC class
         self.edata_fraction = mcc.edata_fraction 
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
         self.qlty_threshold =  mcc.qlty_threshold 
-        self._call_target = 'MC' # MC, host, both : who to call when MC or the wrapped fn is called?
+        self._call_target = 'MC' # 'MC', 'host', or 'both': who to call when MC or the wrapped host is called?
         self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
-        self._host = None   # original unwrapped host function (gets populated by function_wrap)
+        self._host = None   # original unwrapped host (gets populated by mc_wrap)
+        self._host_kind = None # None, 'model', or 'function'
         self._models = [] # list of models (same number of args)
-        self._ncargs = mcc._ncargs + (1 if mcc.auto_id else 0)
+        self._ncargs = mcc._ncargs + (1 if self.auto_id else 0)
         self._qualities = [] # list of model qualities
         self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
-    def __call__(self, *xs, plugin=False, cvals=None):
+    def __call__(self, *xs, wrapper=False, cvals=None):
         cvals = cvals or ()  # set default
-        if not plugin: # called directly, instead of a host function wrapper
-            nfargs = len(xs) - self._ncargs # number of fun args
+        if not wrapper: # called directly, not through a host  wrapper
+            nfargs = len(xs) - self._ncargs # number of fn args
             xs, cvals = xs[:nfargs], xs[nfargs:] # split xs
         fsum = sum([f(*xs) for f in self._functions])
         msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._qualities[idx]])
         res = (msum + fsum)[0] / (sum(self._qualities) + len(self._functions))
-        if not plugin: # called directly, instead of a host function wrapper
+        if not wrapper: # called directly, not through a host wrapper
             res = self._process_result(res, xs, cvals)
         return res
+    
+    def __getattr__(self, item): # delegate any attribute not defined here to host
+        return getattr(self._host, item)
     
     def add_dataset(self, npx, npy, kind='tdata'): # training (default) or evaluation
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
         data = eval('self._'+ kind)
+        if self.auto_id:  # insert id into inputs
+            id_array = np.full((npx.shape[0], 1), id(self))
+            npx = np.concatenate((npx, id_array), axis=1)
         data['inputs'] = np.concatenate((data['inputs'], npx), axis=0) if data['inputs'].size else npx
         data['outputs'] = np.concatenate((data['outputs'], npy), axis=0) if data['outputs'].size else npy
     
@@ -90,13 +96,15 @@ class ModelCaller(): # main MC class
         self._functions.append(fn)
         return len(self._functions) - 1 # return index of the added function
     
-    def add_model(self, model, quality=False):
+    def add_model(self, model=None, quality=False):
+        if model == None:
+            model = self._host
         self._models.append(model)
         self._qualities.append(quality)
-        idx = len(self._models) - 1
         self.print('After adding a model')
+        idx = len(self._models) - 1
         if not quality and self.auto_train:
-            self.train(idx)
+            self.train_model(idx)
         return idx
 
     def find_data(self, x, kind='tdata'):
@@ -105,28 +113,6 @@ class ModelCaller(): # main MC class
         idx = self._npindex(data['inputs'], x)
         y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
-    
-    def fnwrap(self, cargs=None): # wrap MC around some function with optional context
-        cargs = cargs or ()  # set default 
-        def decorator(fn):
-            def wrapper(*xs):
-                self._ncargs = len(cargs) + (1 if self.auto_id else 0)
-                cvals = self._cvals(*cargs)
-                if self.auto_id:
-                    cvals.insert(0, id(self))
-                if self._call_target == 'MC':
-                    y = self(*xs, plugin=True, cvals=cvals) # call only MC
-                elif self._call_target == 'host':
-                    y = fn(*xs)  # call only host
-                else: # self._call_target == 'both': 
-                    y = (self(*xs, plugin=True, cvals=cvals) + fn(*xs)) / 2 # call both host and MC
-                y = self._process_result(y, xs, cvals=cvals)
-                return y 
-            self._host = fn  # save original host function
-            wrapper._mc = self  # save MC object
-            return wrapper
-        self._call_target = 'host'  # initial call target
-        return decorator   
     
     def get_call_target(self):
         return self._call_target
@@ -141,10 +127,10 @@ class ModelCaller(): # main MC class
         return self._qualities[idx]
     
     def merge_host(self):
-        assert self._host != None, "no host function to merge"
-        idx = mc.add_function(mc.get_host())
-        mc.set_call_target('MC')
-        return idx
+        assert self._host != None, "no host to merge"
+        idx = self.add_function() if self._host_kind == 'function' else self.add_model(quality=True)
+        self.set_call_target('MC')
+        return idx, self._host_kind
     
     def print(self, tag, full=False, ntail=2): # print tag string and then MC with ntail inputs and outputs
         print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_test='+str(self.auto_test) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
@@ -167,29 +153,15 @@ class ModelCaller(): # main MC class
     def remove_model(self, idx):
         self._models.pop(idx)
         self._qualities.pop(idx)
-
-    def sensor_wrap(self, skind='direct'): # wrap a sensor around some function g
-        def decorator(g): # add other sensors as needed
-            def direct(*xs): # direct sensor
-                y = g(*xs)
-                self._add_data(y, *xs)
-                return y
-            def inverse(*yxs): # inverse sensor, yxs = (y, xs except xfirst)
-                xfirst = g(*yxs)
-                self._add_data(yxs[0], xfirst, *yxs[1:])
-                return xfirst
-            return eval(skind)  # correct kind of sensor
-        assert skind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
-        return decorator
     
     def set_call_target(self, newstate):
         assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
         if self._host == None and newstate != 'MC':
-            print(f"Warning: can't set call_target to {newstate} because no host function")
+            print(f"Warning: can't set call_target to {newstate} because no host")
         else:
             self._call_target = newstate 
     
-    def test(self, idx, all=False):
+    def test_model(self, idx, all=False):
         if self._edata['inputs'].size == 0:
             return False
         model = self._models[idx]
@@ -204,21 +176,66 @@ class ModelCaller(): # main MC class
     def test_all(self):
         if self._edata['inputs'].size > 0:
             for idx in range(len(self._models)):
-                self.test(idx, all=True)
+                self.test_model(idx, all=True)
             self._auto_call_target()
 
-    def train(self, idx, all=False):
+    def train_model(self, idx, all=False):
         if self._tdata['inputs'].size > 0:  
             self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
             if not all and hasattr(self, 'auto_test') and self.auto_test:
-                self.test(idx)
+                self.test_model(idx)
 
-    def train_all(self):
+    def train_all(self, dataset=None):
+        if dataset != None:
+            self.add_dataset(*dataset, kind='tdata')
         if self._tdata['inputs'].size > 0:
             for idx in range(len(self._models)):
-                self.train(idx, all=True)
+                self.train_model(idx, all=True)
             if self.auto_test:
                 self.test_all()
+     
+    def wrap_host(self, kind='function', cargs=None): # wrap this MC around a host (model or function) with optional context  (replacing the current host)
+        cargs = cargs or ()  # set default 
+        def decorator(host):
+            def wrapper(*xs):
+                self._ncargs = len(cargs)
+                if  kind == 'function':
+                    cvals = self._cvals(*cargs)
+                else: 
+                    assert kind == 'model', "kind must be 'function' or 'model'"
+                    nfargs = len(xs) - self._ncargs # number of fn args
+                    xs, cvals = xs[:nfargs], list(xs[nfargs:]) # split xs
+                if self.auto_id:
+                    self._ncargs += 1
+                    cvals.append(id(self))
+                if self._call_target == 'MC':
+                    y = self(*xs, wrapper=True, cvals=cvals) # call only MC
+                else:
+                    y = host(*xs) if kind == 'function' else host.predict([list(xs) + cvals]) # call fn or model
+                    if self._call_target == 'both': 
+                        y = (self(*xs, wrapper=True, cvals=cvals) + y) / 2 # call both MC and host
+                y = self._process_result(y, xs, cvals=cvals)
+                return y 
+            self._host = host  # save original host function
+            self._host_kind = kind 
+            wrapper._mc = self  # save MC object in the wrapper
+            return wrapper
+        self._call_target = 'host'  # initial call target
+        return decorator   
+   
+    def wrap_sensor(self, skind='direct'): # wrap a sensor around some function g
+        def decorator(g): # add other sensors as needed
+            def direct(*xs): # direct sensor
+                y = g(*xs)
+                self._add_data(y, *xs)
+                return y
+            def inverse(*yxs): # inverse sensor, yxs = (y, xs except xfirst)
+                xfirst = g(*yxs)
+                self._add_data(yxs[0], xfirst, *yxs[1:])
+                return xfirst
+            return eval(skind)  # correct kind of sensor
+        assert skind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
+        return decorator
      
     def _add_data(self, y, *xs):
         kind = 'edata' if random.random() <= self.edata_fraction else 'tdata'
@@ -298,14 +315,14 @@ class ModelCaller(): # main MC class
                 case _: y = FloatCallback(y, self._callback(kind, *xs, *cvals))
         return y    
 
-def fnwrap(fn, cargs=None, **config):
-    """Wrap a (predefined) function in ModelCaller with optional context and config."""
-    return ModelCaller(MCconfig(**config)).fnwrap(cargs)(fn)
+def mc_wrap(host, kind='function', cargs=None, **config):
+    """Wrap a (predefined) model or function in a new ModelCaller object with optional context and config."""
+    return ModelCaller(MCconfig(**config)).wrap_host(kind, cargs)(host)
 
-def fnwrapd(cargs=None, **config):
-    """Decorator for wrapping a function (being defined) in ModelCaller with optional context and config."""
-    def wrapper(fn):
-        return fnwrap(fn, cargs, **config)  
+def mc_wrapd(kind='function', cargs=None, **config):
+    """Decorator for wrapping a model or function (being defined) in a new ModelCaller object with optional context and config."""
+    def wrapper(host):
+        return mc_wrap(host, kind, cargs, **config)  
     return wrapper
 
 def generate_data(f, count=1000, scale=100):
@@ -327,7 +344,7 @@ def repeat_function(f, arity=2, count=10, scale=100):
         args = [random.random() * scale for _ in range(arity)]
         f(*args)
 
-@fnwrapd(cargs=['globalx'])
+@mc_wrapd(cargs=['globalx'])
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
@@ -385,14 +402,14 @@ mc.print('After removing all training data')
 repeat_function(f)
 mc.print('After a few more function calls')
 
-@mc.sensor_wrap()
+@mc.wrap_sensor()
 def fcopy(x0, x1, x3):  # y
     return 3 * x0 + x1 + x3
 
 repeat_function(fcopy, arity=3)
 mc.print('After a few direct-sensor calls')
 
-@mc.sensor_wrap('inverse')
+@mc.wrap_sensor('inverse')
 def finv(y, x1, x2):  # x1
     return (y - x1 -  x2) / 3
 
@@ -422,7 +439,7 @@ mc1.add_model(mc.get_model(0), quality=True) # reuse model
 repeat_function(mc1, arity=3)
 mc1.print('After a few mc calls')
 
-@fnwrapd(auto_id=None)
+@mc_wrapd(auto_id=None)
 def f2(x0, x1):  # y
     return 3 * x0 + x1
 f2(10,11)
@@ -430,27 +447,14 @@ f2._mc.print('A new wrapped MC with only auto-id and no other context argument, 
 
 m = LinearRegression()
 m.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
-fpredict = fnwrap(m.predict)  # wrapping a predefined function
+fpredict = mc_wrap(m.predict)  # wrapping a predefined function
 fpredict([[10, 20, 30]])
 fpredict._mc.print('A new MC, after wrapping a model.predict and calling MC', full=True)
 
-class ModelWrap(ModelCaller):   # to wrap a model (not just its predict fn) #FIXME
-    def __init__(self, model, **kwargs):
-        super().__init__(MCconfig(**kwargs))
-        self.add_model(model)
-    def fit(self, ins, *args, **kwargs):
-        for x in ins:
-            x.insert(0, id(self))
-        return self._models[0].fit(ins, *args, **kwargs)
-    def predict(self, ins, *args, **kwargs):    
-        for x in ins:
-            x.insert(0, id(self))
-        return self._models[0].predict(ins, *args, **kwargs)   
-    def __getattr__(self, item): # delegate any attribute not defined here to the model
-        return getattr(self._models[0], item)
-
-m = LinearRegression()
-mc3 = ModelWrap(m, auto_id=None)  #TODO:allow reusing same name m
-mc3.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
-mc3.predict([[10, 20, 30]])
-mc3.print('A new MC, after wrapping a model and calling fit and predict', full=True)
+m2 = LinearRegression()
+m = mc_wrap(m, kind='model', auto_id=True)
+mc2 = m._mc
+mc2.merge_host()
+mc2.train_all((np.array([[1, 2, 3], [3, 4, 5]]), np.array([9, 10])))
+m(10, 20, 30)
+mc2.print('A new MC, after wrapping a model and calling fit and predict', full=True)
