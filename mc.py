@@ -23,8 +23,17 @@ class FloatCallback(CallbackBase, float): # for floats (and ints)
     def __new__(cls, value, callback):
         assert isinstance(value, float) or isinstance(value, int), "non-float/int value passed to FloatCallback"
         obj = float.__new__(cls, value)  # Create a float instance
-        obj.callback = callback  # Assign the callback directly to this float instance
+        obj.cbfn = callback  # Assign the callback directly to this float instance
         return obj
+    
+class ArrayCallback(CallbackBase, np.ndarray): # for arrays
+    def __new__(cls, input_array, callback):
+        obj = np.asarray(input_array).view(cls)
+        obj.cbfn = callback
+        return obj
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self.cbfn = getattr(obj, 'cbfn', None)
 
 @dataclass
 class MCconfig: # default MC configuration
@@ -33,8 +42,9 @@ class MCconfig: # default MC configuration
     auto_test: bool = True # auto test after training a model?
     auto_train: bool = True # auto train after adding a model?
     edata_fraction: float = 0.3 # fraction of data cached for evaluation (instead of training)
-    feedback_fraction: float = 0# 0.1 # fraction of host calls randomly chosen for feedback
+    feedback_fraction: float = 0# 0.1 # fraction of host calls randomly chosen for feedback    
     qlty_threshold: float = 0.95 # quality (accuracy) threshold for models
+    _host: object = None
     _ncargs: int = 0 # number of context args (model args = function args + context args)
 
 class ModelCaller(): # main MC class
@@ -57,12 +67,13 @@ class ModelCaller(): # main MC class
         self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
     def __call__(self, *xs, plugin=False, cvals=None):
-        if cvals == None: cvals = tuple() # standard python hack
+        cvals = cvals or ()  # set default
         if not plugin: # called directly, instead of a host function wrapper
-            xs, cvals = xs[:-self._ncargs], xs[-self._ncargs:] # split xs
+            nfargs = len(xs) - self._ncargs # number of fun args
+            xs, cvals = xs[:nfargs], xs[nfargs:] # split xs
         fsum = sum([f(*xs) for f in self._functions])
         msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._qualities[idx]])
-        res = (msum[0] + fsum) / (sum(self._qualities) + len(self._functions))
+        res = (msum + fsum)[0] / (sum(self._qualities) + len(self._functions))
         if not plugin: # called directly, instead of a host function wrapper
             res = self._process_result(res, xs, cvals)
         return res
@@ -95,9 +106,9 @@ class ModelCaller(): # main MC class
         y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
     
-    def function_wrap(self, cargs=None): # wrap MC around some function f with cvals data from cargs
-        if cargs == None: cargs = tuple() # standard python hack
-        def decorator(f):
+    def fnwrap(self, cargs=None): # wrap MC around some function with optional context
+        cargs = cargs or ()  # set default 
+        def decorator(fn):
             def wrapper(*xs):
                 self._ncargs = len(cargs) + (1 if self.auto_id else 0)
                 cvals = self._cvals(*cargs)
@@ -106,15 +117,15 @@ class ModelCaller(): # main MC class
                 if self._call_target == 'MC':
                     y = self(*xs, plugin=True, cvals=cvals) # call only MC
                 elif self._call_target == 'host':
-                    y = f(*xs)  # call only host
+                    y = fn(*xs)  # call only host
                 else: # self._call_target == 'both': 
-                    y = (self(*xs, plugin=True, cvals=cvals) + f(*xs)) / 2 # call both host and MC
+                    y = (self(*xs, plugin=True, cvals=cvals) + fn(*xs)) / 2 # call both host and MC
                 y = self._process_result(y, xs, cvals=cvals)
                 return y 
-            self._host = f
-            wrapper._mc = self
+            self._host = fn  # save original host function
+            wrapper._mc = self  # save MC object
             return wrapper
-        self._call_target = 'host'
+        self._call_target = 'host'  # initial call target
         return decorator   
     
     def get_call_target(self):
@@ -256,7 +267,7 @@ class ModelCaller(): # main MC class
             del frame
          
     def _get_feedback(self, y, *xs, cvals=None):
-        if cvals == None: cvals = tuple() # standard python hack
+        cvals = cvals or ()  # set default
         if random.random() <= self.feedback_fraction:
             newy = input(f"x={self._around(list(xs))}, context={self._around(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
             if newy != '':  
@@ -278,17 +289,23 @@ class ModelCaller(): # main MC class
         return '[' + ', '.join([str(row.tolist()) for row in self._around(arr)]) + ']'
     
     def _process_result(self, y, xs, cvals=None):   
-        if cvals == None: cvals = tuple() # standard python hack
+        cvals = cvals or ()  # set default
         y = self._get_feedback(y, *xs, cvals=cvals)
         if self.auto_cache:
             kind = self._add_data(y, *xs, *cvals)
-            y = FloatCallback(y, self._callback(kind, *xs, *cvals)) # y must be int or float
-        return y
-    
-def fnwrap(cargs=None, **kwargs):
-    if cargs == None: cargs = tuple() # standard python hack
-    def wrapper(f):
-        return ModelCaller(MCconfig(**kwargs)).function_wrap(cargs)(f)
+            match type(y):
+                case np.ndarray: y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
+                case _: y = FloatCallback(y, self._callback(kind, *xs, *cvals))
+        return y    
+
+def fnwrap(fn, cargs=None, **config):
+    """Wrap a (predefined) function in ModelCaller with optional context and config."""
+    return ModelCaller(MCconfig(**config)).fnwrap(cargs)(fn)
+
+def fnwrapd(cargs=None, **config):
+    """Decorator for wrapping a function (being defined) in ModelCaller with optional context and config."""
+    def wrapper(fn):
+        return fnwrap(fn, cargs, **config)  
     return wrapper
 
 def generate_data(f, count=1000, scale=100):
@@ -310,7 +327,7 @@ def repeat_function(f, arity=2, count=10, scale=100):
         args = [random.random() * scale for _ in range(arity)]
         f(*args)
 
-@fnwrap(cargs=['globalx'])
+@fnwrapd(cargs=['globalx'])
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
@@ -405,11 +422,17 @@ mc1.add_model(mc.get_model(0), quality=True) # reuse model
 repeat_function(mc1, arity=3)
 mc1.print('After a few mc calls')
 
-@fnwrap(auto_id=None)
+@fnwrapd(auto_id=None)
 def f2(x0, x1):  # y
     return 3 * x0 + x1
 f2(10,11)
 f2._mc.print('A new wrapped MC with only auto-id and no other context argument, after a function call', full=True)
+
+m = LinearRegression()
+m.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
+fpredict = fnwrap(m.predict)  # wrapping a predefined function
+fpredict([[10, 20, 30]])
+fpredict._mc.print('A new MC, after wrapping a model.predict and calling MC', full=True)
 
 class ModelWrap(ModelCaller):   # to wrap a model (not just its predict fn) #FIXME
     def __init__(self, model, **kwargs):
@@ -427,6 +450,7 @@ class ModelWrap(ModelCaller):   # to wrap a model (not just its predict fn) #FIX
         return getattr(self._models[0], item)
 
 m = LinearRegression()
-mc2 = ModelWrap(m, auto_id=None)  #TODO:allow reusing same name m
-mc2.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
-print(mc2.predict([[10, 20, 30]]))
+mc3 = ModelWrap(m, auto_id=None)  #TODO:allow reusing same name m
+mc3.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
+mc3.predict([[10, 20, 30]])
+mc3.print('A new MC, after wrapping a model and calling fit and predict', full=True)
