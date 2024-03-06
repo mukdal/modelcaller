@@ -29,28 +29,30 @@ class FloatCallback(CallbackBase, float): # for floats (and ints)
 @dataclass
 class MCconfig: # default MC configuration
     auto_cache: bool = True # auto cache host call data?
+    auto_id: bool = False # automatically add MC id as a context arg; if None then only auto_id
     auto_test: bool = True # auto test after training a model?
     auto_train: bool = True # auto train after adding a model?
     edata_fraction: float = 0.3 # fraction of data cached for evaluation (instead of training)
-    feedback_fraction: float = 0.1 # fraction of host calls randomly chosen for feedback
+    feedback_fraction: float = 0# 0.1 # fraction of host calls randomly chosen for feedback
     qlty_threshold: float = 0.95 # quality (accuracy) threshold for models
     _ncargs: int = 0 # number of context args (model args = function args + context args)
 
 class ModelCaller(): # main MC class
-    def __init__(self, mcconfig=MCconfig()):
+    def __init__(self, mcc=MCconfig()):
         super().__init__()
-        self.auto_cache = mcconfig.auto_cache
-        self.auto_test = mcconfig.auto_test
-        self.auto_train = mcconfig.auto_train
-        self.edata_fraction = mcconfig.edata_fraction 
-        self.feedback_fraction = mcconfig.feedback_fraction 
-        self.qlty_threshold =  mcconfig.qlty_threshold 
+        self.auto_cache = False if mcc.auto_id == None else mcc.auto_cache
+        self.auto_id = True if mcc.auto_id == None else mcc.auto_id
+        self.auto_test = False if mcc.auto_id == None else mcc.auto_test
+        self.auto_train = False if mcc.auto_id == None else mcc.auto_train
+        self.edata_fraction = mcc.edata_fraction 
+        self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
+        self.qlty_threshold =  mcc.qlty_threshold 
         self._call_target = 'MC' # MC, host, both : who to call when MC or the wrapped fn is called?
         self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
         self._host = None   # original unwrapped host function (gets populated by function_wrap)
         self._models = [] # list of models (same number of args)
-        self._ncargs = mcconfig._ncargs 
+        self._ncargs = mcc._ncargs + (1 if mcc.auto_id else 0)
         self._qualities = [] # list of model qualities
         self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
@@ -93,12 +95,14 @@ class ModelCaller(): # main MC class
         y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
     
-    def function_wrap(self, *cargs): # wrap MC around some function f with cvals data from cargs
+    def function_wrap(self, cargs=None): # wrap MC around some function f with cvals data from cargs
+        if cargs == None: cargs = tuple() # standard python hack
         def decorator(f):
             def wrapper(*xs):
-                self._host = f
-                self._ncargs = len(cargs)
+                self._ncargs = len(cargs) + (1 if self.auto_id else 0)
                 cvals = self._cvals(*cargs)
+                if self.auto_id:
+                    cvals.insert(0, id(self))
                 if self._call_target == 'MC':
                     y = self(*xs, plugin=True, cvals=cvals) # call only MC
                 elif self._call_target == 'host':
@@ -107,6 +111,8 @@ class ModelCaller(): # main MC class
                     y = (self(*xs, plugin=True, cvals=cvals) + f(*xs)) / 2 # call both host and MC
                 y = self._process_result(y, xs, cvals=cvals)
                 return y 
+            self._host = f
+            wrapper._mc = self
             return wrapper
         self._call_target = 'host'
         return decorator   
@@ -129,8 +135,8 @@ class ModelCaller(): # main MC class
         mc.set_call_target('MC')
         return idx
     
-    def print(self, tag, ntail=2): # print tag string and then MC with ntail inputs and outputs
-        print(f"{tag}: call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
+    def print(self, tag, full=False, ntail=2): # print tag string and then MC with ntail inputs and outputs
+        print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_test='+str(self.auto_test) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
     
     def remove_data(self, idx, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -279,6 +285,12 @@ class ModelCaller(): # main MC class
             y = FloatCallback(y, self._callback(kind, *xs, *cvals)) # y must be int or float
         return y
     
+def fnwrap(cargs=None, **kwargs):
+    if cargs == None: cargs = tuple() # standard python hack
+    def wrapper(f):
+        return ModelCaller(MCconfig(**kwargs)).function_wrap(cargs)(f)
+    return wrapper
+
 def generate_data(f, count=1000, scale=100):
     global globalx
     inputs = np.zeros((count, 3))
@@ -298,13 +310,13 @@ def repeat_function(f, arity=2, count=10, scale=100):
         args = [random.random() * scale for _ in range(arity)]
         f(*args)
 
-mc = ModelCaller()
-@mc.function_wrap('globalx')
+@fnwrap(cargs=['globalx'])
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
+mc = f._mc
 
-mc.print('Intial mc, a new MC')
+mc.print('A new wrapped MC with one context argument', full=True)
 repeat_function(f)
 mc.print('After a few function calls')
 
@@ -335,7 +347,7 @@ if mc.get_call_target() == 'MC':
 
 if mc.get_model_quality(midx) == False:
     mc.qlty_threshold = -100
-    mc.print('After updating threshold')
+    mc.print('After updating qlty_threshold', full=True)
     mc.test_all()
     mc.print('After retesting all models with the new threshold')
     repeat_function(f)
@@ -343,7 +355,7 @@ if mc.get_model_quality(midx) == False:
 
 mc.remove_model(1)
 mc.qlty_threshold = 0.95
-mc.print('After removing the second model and reverting the threshold')
+mc.print('After removing the second model and reverting the threshold', full=True)
 
 mc.add_function(lambda x: x * x)
 mc.print('After adding a new function')
@@ -379,7 +391,7 @@ for kind in ('tdata', 'edata'):
         print(f"Feedback callback: {y:.1f} updated to {out} in _{kind}['outputs'][{idx}] for inputs [2, 3, 1]")
 
 repeat_function(mc, arity=3)
-mc.print('After a few direct mc calls')
+mc.print('After a few MC calls')
 
 globalx = 1
 y = f(2, 3)
@@ -388,7 +400,33 @@ mc.remove_dataset('edata')
 y.callback(100.0)
 
 mc1 = ModelCaller(MCconfig(_ncargs=1))
-mc1.print('Initial mc1, a new MC')
+mc1.print('A new unwrapped MC with one context argument', full=True)
 mc1.add_model(mc.get_model(0), quality=True) # reuse model
 repeat_function(mc1, arity=3)
-mc1.print('After a few mc1 calls')
+mc1.print('After a few mc calls')
+
+@fnwrap(auto_id=None)
+def f2(x0, x1):  # y
+    return 3 * x0 + x1
+f2(10,11)
+f2._mc.print('A new wrapped MC with only auto-id and no other context argument, after a function call', full=True)
+
+class ModelWrap(ModelCaller):   # to wrap a model (not just its predict fn) #FIXME
+    def __init__(self, model, **kwargs):
+        super().__init__(MCconfig(**kwargs))
+        self.add_model(model)
+    def fit(self, ins, *args, **kwargs):
+        for x in ins:
+            x.insert(0, id(self))
+        return self._models[0].fit(ins, *args, **kwargs)
+    def predict(self, ins, *args, **kwargs):    
+        for x in ins:
+            x.insert(0, id(self))
+        return self._models[0].predict(ins, *args, **kwargs)   
+    def __getattr__(self, item): # delegate any attribute not defined here to the model
+        return getattr(self._models[0], item)
+
+m = LinearRegression()
+mc2 = ModelWrap(m, auto_id=None)  #TODO:allow reusing same name m
+mc2.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
+print(mc2.predict([[10, 20, 30]]))
