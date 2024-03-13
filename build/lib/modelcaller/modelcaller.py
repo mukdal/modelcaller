@@ -1,52 +1,148 @@
-"""mc.py. Copyright (C) 2024, Mukesh Dalal <mukesh@aidaa.ai>"""
+"""modelcaller.py. Copyright (C) 2024, Mukesh Dalal <mukesh@aidaa.ai>"""
 
-import numpy as np
+from dataclasses import dataclass
 from inspect import currentframe
 from random import random
-from dataclasses import dataclass
+import numpy as np
 
-class CallbackBase: # for adding callbacks to objects w/o dynamic attributes
+class CallbackBase:
+    """
+    Facilitates adding callbacks to objects. It enables direct callback invocation and 
+    delegates undefined attribute access to the encapsulated object.
+
+    Attributes:
+        value: The object enhanced with a callback.
+        cbfn: The callback function to invoke.
+    """
     def __init__(self, value, callback):
+        """
+        Initializes the CallbackBase with an object and its callback.
+
+        Args:
+            value: Object to which the callback is added.
+            callback: Callback function.
+        """
         self.value = value
         self.cbfn = callback
+
     def callback(self, *args, **kwargs):
+        """
+        Executes the callback function with given arguments.
+        
+        Returns:
+            Result of the callback function.
+        """
         return self.cbfn(*args, **kwargs)
-    def __getattr__(self, item): # delegate any attribute not defined here to the value
-        return getattr(self.value, item)    
+
+    def __getattr__(self, item):
+        """
+        Delegates attribute access to the encapsulated object if not found in this class.
+        
+        Returns:
+            The requested attribute from `value`.
+        """
+        return getattr(self.value, item)
+   
     
-class FloatCallback(CallbackBase, float): # for floats (and ints)
+class FloatCallback(CallbackBase, float):
+    """
+    Extends CallbackBase to support floats and integers with callbacks.
+    It integrates callback functionality into float instances.
+    """
     def __new__(cls, value, callback):
-        assert isinstance(value, float) or isinstance(value, int), "non-float/int value passed to FloatCallback"
-        obj = float.__new__(cls, value)  # Create a float instance
-        obj.cbfn = callback  # Assign the callback directly to this float instance
+        """
+        Creates a new FloatCallback instance, ensuring the value is a float or integer.
+
+        Args:
+            value (float|int): The float or integer value to enhance with a callback.
+            callback (callable): The callback function to associate with this value.
+
+        Returns:
+            A new FloatCallback instance.
+
+        Raises:
+            AssertionError: If `value` is not a float or int.
+        """
+        assert isinstance(value, (float, int)), "non-float/int value passed to FloatCallback"
+        obj = float.__new__(cls, value)  # Instantiate as float
+        obj.cbfn = callback  # Attach callback function
         return obj
-    
-class ArrayCallback(CallbackBase, np.ndarray): # for arrays
+
+class ArrayCallback(CallbackBase, np.ndarray):
+    """
+    Extends CallbackBase to support numpy arrays with callbacks.
+    Enables callbacks on array operations or accesses.
+    """
     def __new__(cls, input_array, callback):
-        obj = np.asarray(input_array).view(cls)
-        obj.cbfn = callback
+        """
+        Creates a new ArrayCallback instance from a numpy array.
+
+        Args:
+            input_array (np.ndarray): The numpy array to enhance with a callback.
+            callback (callable): The callback function to associate with the array.
+
+        Returns:
+            A new ArrayCallback instance.
+        """
+        obj = np.asarray(input_array).view(cls)  # Create an instance viewed as ArrayCallback
+        obj.cbfn = callback  # Attach callback function
         return obj
+
     def __array_finalize__(self, obj):
-        if obj is None: return
-        self.cbfn = getattr(obj, 'cbfn', None)
+        """
+        Finalizes the array, ensuring the callback is attached to new instances.
+
+        This method is called automatically when new instances are created through slicing.
+
+        Args:
+            obj: The object from which to inherit the callback, if available.
+        """
+        if obj is None: return  # Exit if obj is None
+        self.cbfn = getattr(obj, 'cbfn', None)  # Inherit or set default callback
 
 @dataclass
 class MCconfig: # default MC configuration
-    auto_cache: bool = True # auto cache host call data?
-    auto_id: bool = False # automatically add MC id as the last context arg; if None then just thin MC with only auto_id
-    auto_test: bool = True # auto test after training a model?
-    auto_train: bool = True # auto train after adding a model?
-    edata_fraction: float = 0.3 # fraction of data cached for evaluation (instead of training)
-    feedback_fraction: float = 0 #0.1 # fraction of host calls randomly chosen for feedback    
-    qlty_threshold: float = 0.95 # quality (accuracy) threshold for models
-    _ncargs: int = 0 # number of context args, except id (model args = function args + context args)
+    """
+    Default configuration for ModelCaller operations.
 
-class ModelCaller(): # main MC class
+    Attributes:
+        auto_cache (bool): Enable automatic caching of host call data.
+        auto_id (bool): Automatically add MC id as the last context argument; None for thin MC with only auto_id.
+        auto_eval (bool): Automatically evaluate models after training.
+        auto_train (bool): Automatically train models after adding them.
+        edata_fraction (float): Fraction of data cached for evaluation instead of training.
+        feedback_fraction (float): Fraction of host calls randomly chosen for feedback.
+        qlty_threshold (float): Quality (accuracy) threshold for models to be considered successful.
+        _ncargs (int): Number of context arguments, excluding id.
+    """
+    auto_cache: bool = True
+    auto_id: bool = False
+    auto_eval: bool = True
+    auto_train: bool = True
+    edata_fraction: float = 0.3
+    feedback_fraction: float = 0.1 
+    qlty_threshold: float = 0.95
+    _ncargs: int = 0
+
+class ModelCaller():
+    """
+    Main ModelCaller class for managing model calls, including wrapping functions and models,
+    and handling automatic training, evaluation, and data management.
+
+    Attributes:
+        Various configuration options (e.g., auto_cache, auto_train) control the behavior of the MC.
+    """
     def __init__(self, mcc=MCconfig()):
+        """
+        Initializes ModelCaller with a configuration object.
+
+        Args:
+            mcc (MCconfig):  ModelCaller Configuration.
+        """
         super().__init__()
         self.auto_cache = False if mcc.auto_id == None else mcc.auto_cache
         self.auto_id = True if mcc.auto_id == None else mcc.auto_id
-        self.auto_test = False if mcc.auto_id == None else mcc.auto_test
+        self.auto_eval = False if mcc.auto_id == None else mcc.auto_eval
         self.auto_train = False if mcc.auto_id == None else mcc.auto_train
         self.edata_fraction = mcc.edata_fraction 
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
@@ -101,6 +197,24 @@ class ModelCaller(): # main MC class
         if not quality and self.auto_train:
             self.train_model(idx)
         return idx
+   
+    def eval_model(self, idx, all=False):
+        if self._edata['inputs'].size == 0:
+            return False
+        model = self._models[idx]
+        score = model.score(self._edata['inputs'], self._edata['outputs'])
+        res = score >= self.qlty_threshold
+        print(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
+        self._qualities[idx] = res
+        if not all:  # not evaluating all models
+            self._auto_call_target()
+        return res
+    
+    def eval_all(self):
+        if self._edata['inputs'].size > 0:
+            for idx in range(len(self._models)):
+                self.eval_model(idx, all=True)
+            self._auto_call_target()
 
     def find_data(self, x, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -128,7 +242,7 @@ class ModelCaller(): # main MC class
         return idx, self._host_kind
     
     def print(self, tag, full=False, ntail=2): # print tag string and then MC with ntail inputs and outputs
-        print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_test='+str(self.auto_test) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
+        print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
     
     def remove_data(self, idx, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -155,30 +269,12 @@ class ModelCaller(): # main MC class
             print(f"Warning: can't set call_target to {newstate} because no host")
         else:
             self._call_target = newstate 
-    
-    def test_model(self, idx, all=False):
-        if self._edata['inputs'].size == 0:
-            return False
-        model = self._models[idx]
-        score = model.score(self._edata['inputs'], self._edata['outputs'])
-        res = score >= self.qlty_threshold
-        print(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
-        self._qualities[idx] = res
-        if not all:  # not testing all models
-            self._auto_call_target()
-        return res
-    
-    def test_all(self):
-        if self._edata['inputs'].size > 0:
-            for idx in range(len(self._models)):
-                self.test_model(idx, all=True)
-            self._auto_call_target()
-
+ 
     def train_model(self, idx, all=False):
         if self._tdata['inputs'].size > 0:  
             self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
-            if not all and hasattr(self, 'auto_test') and self.auto_test:
-                self.test_model(idx)
+            if not all and hasattr(self, 'auto_eval') and self.auto_eval:
+                self.eval_model(idx)
 
     def train_all(self, dataset=None):
         if dataset != None:
@@ -186,8 +282,8 @@ class ModelCaller(): # main MC class
         if self._tdata['inputs'].size > 0:
             for idx in range(len(self._models)):
                 self.train_model(idx, all=True)
-            if self.auto_test:
-                self.test_all()
+            if self.auto_eval:
+                self.eval_all()
      
     def wrap_host(self, kind='function', cargs=None): # wrap this MC around a host (model or function) with optional context  (replacing the current host)
         cargs = cargs or list() # set default
