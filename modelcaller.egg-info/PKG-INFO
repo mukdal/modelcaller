@@ -4,3 +4,8 @@ Version: 0.1
 Summary: Intermediary objects for calling AI models
 Author: Mukesh Dalal
 Author-email: mukesh@aidaa.ai
+License: Custom
+Description-Content-Type: text/markdown
+License-File: LICENSE.txt
+
+Introduction, Features, Installation, Usage, Contributing, License, and Credits.

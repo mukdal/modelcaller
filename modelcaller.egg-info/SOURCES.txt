@@ -1,3 +1,5 @@
+LICENSE.txt
+README.md
 setup.py
 modelcaller/__init__.py
 modelcaller/modelcaller.py
