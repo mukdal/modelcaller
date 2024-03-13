@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from inspect import currentframe
 from random import random
 import numpy as np
+from sklearn.base import BaseEstimator
+from torch import Tensor, from_numpy
+from torch.optim import AdamW
+from torch.nn import Module
+from torch.nn.functional import mse_loss
 
 class CallbackBase:
     """
@@ -108,8 +113,8 @@ class MCconfig: # default MC configuration
     Attributes:
         auto_cache (bool): Enable automatic caching of host call data.
         auto_id (bool): Automatically add MC id as the last context argument; None for thin MC with only auto_id.
-        auto_eval (bool): Automatically evaluate models after training.
-        auto_train (bool): Automatically train models after adding them.
+        auto_mceval (bool): Automatically evaluate models after training.
+        auto_mctrain (bool): Automatically train models after adding them.
         edata_fraction (float): Fraction of data cached for evaluation instead of training.
         feedback_fraction (float): Fraction of host calls randomly chosen for feedback.
         qlty_threshold (float): Quality (accuracy) threshold for models to be considered successful.
@@ -117,10 +122,10 @@ class MCconfig: # default MC configuration
     """
     auto_cache: bool = True
     auto_id: bool = False
-    auto_eval: bool = True
-    auto_train: bool = True
+    auto_mceval: bool = True
+    auto_mctrain: bool = True
     edata_fraction: float = 0.3
-    feedback_fraction: float = 0.1 
+    feedback_fraction: float = 0#0.1 
     qlty_threshold: float = 0.95
     _ncargs: int = 0
 
@@ -130,7 +135,7 @@ class ModelCaller():
     and handling automatic training, evaluation, and data management.
 
     Attributes:
-        Various configuration options (e.g., auto_cache, auto_train) control the behavior of the MC.
+        Various configuration options (e.g., auto_cache, auto_mctrain) control the behavior of the MC.
     """
     def __init__(self, mcc=MCconfig()):
         """
@@ -142,29 +147,31 @@ class ModelCaller():
         super().__init__()
         self.auto_cache = False if mcc.auto_id == None else mcc.auto_cache
         self.auto_id = True if mcc.auto_id == None else mcc.auto_id
-        self.auto_eval = False if mcc.auto_id == None else mcc.auto_eval
-        self.auto_train = False if mcc.auto_id == None else mcc.auto_train
+        self.auto_mceval = False if mcc.auto_id == None else mcc.auto_mceval
+        self.auto_mctrain = False if mcc.auto_id == None else mcc.auto_mctrain
         self.edata_fraction = mcc.edata_fraction 
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
         self.qlty_threshold =  mcc.qlty_threshold 
         self._call_target = 'MC' # 'MC', 'host', or 'both': who to call when MC or the wrapped host is called?
-        self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
+        self._edata = {'inputs': np.array([], dtype=float), 'outputs': np.array([], dtype=float)}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
         self._host = None   # original unwrapped host (gets populated by mc_wrap)
         self._host_kind = None # None, 'model', or 'function'
         self._models = [] # list of models (same number of args)
         self._ncargs = mcc._ncargs + (1 if self.auto_id else 0)
         self._qualities = [] # list of model qualities
-        self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
+        self._tdata = {'inputs': np.array([], dtype=float), 'outputs': np.array([], dtype=float)}  # saved training data
         
     def __call__(self, *xs, wrapper=False, cvals=None):
         cvals = cvals or list()  # set default
+        nensemble = (sum(self._qualities) + len(self._functions))
+        assert nensemble > 0, "No models or functions in ModelCaller"
         if not wrapper: # called directly, not through a host  wrapper
             nfargs = len(xs) - self._ncargs # number of fn args
             xs, cvals = xs[:nfargs], xs[nfargs:] # split xs
         fsum = sum([f(*xs) for f in self._functions])
-        msum = sum([model.predict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._qualities[idx]])
-        res = (msum + fsum)[0] / (sum(self._qualities) + len(self._functions))
+        msum = sum([model._mcpredict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._qualities[idx]])
+        res = (msum + fsum)[0] / nensemble
         if not wrapper: # called directly, not through a host wrapper
             res = self._process_result(res, xs, cvals)
         return res
@@ -190,11 +197,13 @@ class ModelCaller():
     def add_model(self, model=None, quality=False):
         if model == None:
             model = self._host
+        else:
+            self._frame_model(model)
         self._models.append(model)
         self._qualities.append(quality)
         self.print('After adding a model')
         idx = len(self._models) - 1
-        if not quality and self.auto_train:
+        if not quality and self.auto_mctrain:
             self.train_model(idx)
         return idx
    
@@ -202,7 +211,7 @@ class ModelCaller():
         if self._edata['inputs'].size == 0:
             return False
         model = self._models[idx]
-        score = model.score(self._edata['inputs'], self._edata['outputs'])
+        score = model._mceval(self._edata['inputs'], self._edata['outputs'])
         res = score >= self.qlty_threshold
         print(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
         self._qualities[idx] = res
@@ -242,7 +251,7 @@ class ModelCaller():
         return idx, self._host_kind
     
     def print(self, tag, full=False, ntail=2): # print tag string and then MC with ntail inputs and outputs
-        print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
+        print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_mceval='+str(self.auto_mceval) if full else ''}{', auto_mctrain='+str(self.auto_mctrain) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
     
     def remove_data(self, idx, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -271,9 +280,10 @@ class ModelCaller():
             self._call_target = newstate 
  
     def train_model(self, idx, all=False):
-        if self._tdata['inputs'].size > 0:  
-            self._models[idx].fit(self._tdata['inputs'], self._tdata['outputs'])
-            if not all and hasattr(self, 'auto_eval') and self.auto_eval:
+        if self._tdata['inputs'].size > 0:
+            model = self._models[idx]  
+            self._models[idx]._mctrain(self._tdata['inputs'], self._tdata['outputs'])
+            if not all and hasattr(self, 'auto_mceval') and self.auto_mceval:
                 self.eval_model(idx)
 
     def train_all(self, dataset=None):
@@ -282,7 +292,7 @@ class ModelCaller():
         if self._tdata['inputs'].size > 0:
             for idx in range(len(self._models)):
                 self.train_model(idx, all=True)
-            if self.auto_eval:
+            if self.auto_mceval:
                 self.eval_all()
      
     def wrap_host(self, kind='function', cargs=None): # wrap this MC around a host (model or function) with optional context  (replacing the current host)
@@ -304,7 +314,7 @@ class ModelCaller():
                 if self._call_target == 'MC':
                     y = self(*xs, wrapper=True, cvals=cvals) # call only MC
                 else:
-                    y = host(*xs) if kind == 'function' else host.predict([list(xs) + cvals]) # call fn or model
+                    y = host(*xs) if kind == 'function' else host._mcpredict([list(xs) + cvals]) # call fn or model
                     if self._call_target == 'both': 
                         y = (self(*xs, wrapper=True, cvals=cvals) + y) / 2 # call both MC and host
                 y = self._process_result(y, xs, cvals=cvals)
@@ -312,6 +322,8 @@ class ModelCaller():
             self._host = host  # save original host function
             self._host_kind = kind 
             wrapper._mc = self  # save MC object in the wrapper
+            if kind == 'model':
+                self._frame_model(host)
             return wrapper
         self._call_target = 'host'  # initial call target
         return decorator   
@@ -366,6 +378,17 @@ class ModelCaller():
                 print("Warning: feedback callback couldn't find the inputs", args, "in", kind)
         return inner
          
+    @staticmethod
+    def _frame_model(model):
+        if isinstance(model, BaseEstimator):
+            model._mcpredict = model.predict
+            model._mctrain = model.fit
+            model._mceval = model.score
+        elif isinstance(model, Module):
+            model._mcpredict = lambda x : torch_mcpredict(model, x)
+            model._mctrain = lambda x,y : torch_mctrain(model, x, y)
+            model._mceval = lambda x,y : torch_mceval(model, x, y)
+    
     def _get_feedback(self, y, *xs, cvals=None):
         cvals = cvals or list()  # set default
         if random() <= self.feedback_fraction:
@@ -395,6 +418,7 @@ class ModelCaller():
             kind = self._add_data(y, *xs, *cvals)
             match type(y):
                 case np.ndarray: y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
+
                 case _: y = FloatCallback(y, self._callback(kind, *xs, *cvals))
         return y    
 
@@ -407,3 +431,35 @@ def mc_wrapd(kind='function', cargs=None, **config):
     def wrapper(host):
         return mc_wrap(host, kind, cargs, **config)  
     return wrapper
+
+def torch_mcpredict(model, x):
+    model.train(False)
+    xtype = type(x)
+    if xtype == list: 
+        x = np.array(x, dtype=np.float32)
+    y = model(from_numpy(x)).detach().numpy()
+    if xtype == list: 
+        y = y.tolist()
+    return y[0]  
+
+def torch_mctrain(model, x, yt, epochs=100, lossfn=mse_loss, optimizer=AdamW):
+    model.train()
+    optimizer = optimizer(model.parameters())
+    x = from_numpy(x)
+    yt = from_numpy(yt)
+    for i in range(epochs): 
+        y = model(x)
+        loss = lossfn(y, yt)
+        optimizer.zero_grad()  # reset gradients
+        loss.backward()
+        optimizer.step()
+
+def torch_mceval(model, x, yt):
+    model.train(False)
+    x = from_numpy(x)
+    yt = from_numpy(yt)
+    y = model(x)
+    sum_error = (y - yt).pow(2).sum()
+    yt_mean = yt.mean()
+    sum_sqr = (yt - yt_mean).pow(2).sum()
+    return (1 - sum_error / sum_sqr).item() 
