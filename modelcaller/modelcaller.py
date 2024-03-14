@@ -5,10 +5,13 @@ from inspect import currentframe
 from random import random
 import numpy as np
 from sklearn.base import BaseEstimator
-from torch import Tensor, from_numpy
+from torch import from_numpy
 from torch.optim import AdamW
 from torch.nn import Module
 from torch.nn.functional import mse_loss
+import logging
+logging.basicConfig(format='%(levelname)s:%(module)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 class CallbackBase:
     """
@@ -178,7 +181,10 @@ class ModelCaller():
     
     def __getattr__(self, item): # delegate any attribute not defined here to host
         return getattr(self._host, item)
-    
+       
+    def __str__(self):
+        return self.fullstr(self, full=False)
+   
     def add_dataset(self, npx, npy, kind='tdata'): # training (default) or evaluation
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
         data = eval('self._'+ kind)
@@ -201,7 +207,7 @@ class ModelCaller():
             self._frame_model(model)
         self._models.append(model)
         self._qualities.append(quality)
-        self.print('After adding a model')
+        logger.info(f"After adding a model: {self.fullstr()}")
         idx = len(self._models) - 1
         if not quality and self.auto_mctrain:
             self.train_model(idx)
@@ -213,7 +219,7 @@ class ModelCaller():
         model = self._models[idx]
         score = model._mceval(self._edata['inputs'], self._edata['outputs'])
         res = score >= self.qlty_threshold
-        print(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
+        logger.info(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
         self._qualities[idx] = res
         if not all:  # not evaluating all models
             self._auto_call_target()
@@ -231,6 +237,9 @@ class ModelCaller():
         idx = self._npindex(data['inputs'], x)
         y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
+      
+    def fullstr(self, full=True, ntail=2): # string representation of MC with ntail inputs and outputs
+        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_mceval='+str(self.auto_mceval) if full else ''}{', auto_mctrain='+str(self.auto_mctrain) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
     
     def get_call_target(self):
         return self._call_target
@@ -249,9 +258,6 @@ class ModelCaller():
         idx = self.add_function() if self._host_kind == 'function' else self.add_model(quality=True)
         self.set_call_target('MC')
         return idx, self._host_kind
-    
-    def print(self, tag, full=False, ntail=2): # print tag string and then MC with ntail inputs and outputs
-        print(f"{tag}: {'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_mceval='+str(self.auto_mceval) if full else ''}{', auto_mctrain='+str(self.auto_mctrain) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}")
     
     def remove_data(self, idx, kind='tdata'):
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -275,7 +281,7 @@ class ModelCaller():
     def set_call_target(self, newstate):
         assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
         if self._host == None and newstate != 'MC':
-            print(f"Warning: can't set call_target to {newstate} because no host")
+            logger.warning(f"Can't set call_target to {newstate} because no host")
         else:
             self._call_target = newstate 
  
@@ -375,7 +381,7 @@ class ModelCaller():
                 data['outputs'][idx] = y
                 return y
             else:
-                print("Warning: feedback callback couldn't find the inputs", args, "in", kind)
+                logger.warning(f"Feedback callback couldn't find the inputs {args} in {kind}")
         return inner
          
     @staticmethod
