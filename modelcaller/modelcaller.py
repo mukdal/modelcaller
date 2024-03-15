@@ -71,132 +71,174 @@ class ArrayCallback(CallbackBase, np.ndarray):
 class MCconfig:
     """
     Default configuration for a ModelCaller object.
-    Attributes:
-        auto_cache (bool): Enable automatic caching of host call data.
-        auto_id (bool): Automatically add MC id as the last context argument; None for thin MC with only auto_id.
-        auto_mceval (bool): Automatically evaluate models after training.
-        auto_mctrain (bool): Automatically train models after adding them.
-        edata_fraction (float): Fraction of data cached for evaluation instead of training.
-        feedback_fraction (float): Fraction of host calls randomly chosen for feedback.
-        qlty_threshold (float): Quality (accuracy) threshold for models to be considered successful.
-        _ncargs (int): Number of context arguments, excluding id.
+    auto_cache (bool): Enable automatic caching of host call data.
+    auto_call_target (bool): Automatically change call target from 'host' to 'both' when a model qualifies after testing.
+    auto_id (bool): Automatically add MC id as the last context argument; None for a thin MC with only auto_id capability.
+    auto_eval (bool): Automatically evaluate models after their training.
+    auto_train (bool): Automatically train models after adding them.
+    edata_fraction (float): Fraction of data cached for evaluation instead of training.
+    feedback_fraction (float): Fraction of host calls randomly chosen for supervisory feedback.
+    qlty_threshold (float): Quality threshold for models to be considered qualified.
+    _ncparams (int): Number of context parameters, excluding id.
     """
     auto_cache: bool = True
+    auto_call_target: bool = True
     auto_id: bool = False
-    auto_mceval: bool = True
-    auto_mctrain: bool = True
+    auto_eval: bool = True
+    auto_train: bool = True
     edata_fraction: float = 0.3
     feedback_fraction: float = 0.1 
     qlty_threshold: float = 0.95
-    _ncargs: int = 0
+    _ncparams: int = 0
 
 class ModelCaller():
     """
-    Main ModelCaller class for managing model calls, including wrapping functions and models,
-    and handling automatic training, evaluation, and data management.
-
-    Attributes:
-        Various configuration options (e.g., auto_cache, auto_mctrain) control the behavior of the MC.
+    Facilitates wrapping, connecting, training, testing, and calling models and functions with enhanced capabilities like automatic training, testing, feedback collection, and data caching.
     """
     def __init__(self, mcc=MCconfig()):
         """
-        Initializes ModelCaller with a configuration object.
-
-        Args:
-            mcc (MCconfig):  ModelCaller Configuration.
+        mcc (MCconfig):  ModelCaller Configuration.
         """
         super().__init__()
         self.auto_cache = False if mcc.auto_id == None else mcc.auto_cache
-        self.auto_id = True if mcc.auto_id == None else mcc.auto_id
-        self.auto_mceval = False if mcc.auto_id == None else mcc.auto_mceval
-        self.auto_mctrain = False if mcc.auto_id == None else mcc.auto_mctrain
+        self.auto_call_target = False if mcc.auto_id == None else mcc.auto_call_target
+        self.auto_id = True if mcc.auto_id == None else mcc.auto_id # subtlety!
+        self.auto_eval = False if mcc.auto_id == None else mcc.auto_eval
+        self.auto_train = False if mcc.auto_id == None else mcc.auto_train
         self.edata_fraction = mcc.edata_fraction 
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
         self.qlty_threshold =  mcc.qlty_threshold 
         self._call_target = 'MC' # 'MC', 'host', or 'both': who to call when MC or the wrapped host is called?
         self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
-        self._functions = [] # list of functions (same number of args)
-        self._host = None   # original unwrapped host (gets populated by mc_wrap)
+        self._functions = [] # list of registered functions
+        self._host = None   # original unwrapped host (gets populated by wrap_host method)
         self._host_kind = None # None, 'model', or 'function'
-        self._models = [] # list of models (same number of args)
-        self._ncargs = mcc._ncargs + (1 if self.auto_id else 0)
-        self._qualities = [] # list of model qualities
+        self._models = [] # list of registered models
+        self._ncparams = mcc._ncparams + (1 if self.auto_id else 0)
+        self._qualified = [] # list of bools indicating whether corresponding model is qualified
         self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
-    def __call__(self, *xs, wrapper=False, cvals=None):
-        cvals = cvals or list()  # set default
-        nensemble = (sum(self._qualities) + len(self._functions))
+    def __call__(self, *xs, wrapper=False, cargs=None):
+        """
+        Calls registered models and functions and caches data based on configuration.
+        xs (list): List of function arguments.
+        wrapper (bool): True if called through a host wrapper.
+        cargs (list): List of context arguments.
+        """
+        cargs = cargs or list()  # set default
+        nensemble = (len(self._functions) + sum(self._qualified)) # number of functions and qualified models
         assert nensemble > 0, "No models or functions in ModelCaller"
-        if not wrapper: # called directly, not through a host  wrapper
-            nfargs = len(xs) - self._ncargs # number of fn args
-            xs, cvals = xs[:nfargs], xs[nfargs:] # split xs
-        fsum = sum([f(*xs) for f in self._functions])
-        msum = sum([model._mcpredict([list(xs)+list(cvals)]) for idx, model in enumerate(self._models) if self._qualities[idx]])
-        res = (msum + fsum)[0] / nensemble
-        if not wrapper: # called directly, not through a host wrapper
-            res = self._process_result(res, xs, cvals)
+        if not wrapper: # split xs into fn and context args
+            nfargs = len(xs) - self._ncparams # number of fn args
+            xs, cargs = xs[:nfargs], xs[nfargs:]
+        fsum = sum([f(*xs) for f in self._functions])  # call functions
+        msum = sum([model._mcpredict([list(xs)+list(cargs)]) for idx, model in enumerate(self._models) if self._qualified[idx]]) # call qualified models
+        res = (msum + fsum)[0] / nensemble # average
+        if not wrapper: # otherwise, this will be done in the host wrapper
+            res = self._process_result(res, xs, cargs)
         return res
     
-    def __getattr__(self, item): # delegate any attribute not defined here to host
+    def __getattr__(self, item):
+        """
+        Delegates undefined attribute access to the wrapped host, enabling seamless integration with host capabilities.
+        """
         return getattr(self._host, item)
        
-    #def __str__(self): return self.fullstr(self, full=False)
-   
-    def add_dataset(self, npx, npy, kind='tdata'): # training (default) or evaluation
+    def add_dataset(self, np_in, np_out, kind='tdata'): # training (default) or evaluation
+        """
+        Adds a dataset for training (default) or evaluation ('edata'), adding MC ID to inputs if configured.
+        np_in (np.array): Inputs.
+        np_out (np.array): Outputs.
+        """
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
         data = eval('self._'+ kind)
         if self.auto_id:  # insert id into inputs
-            id_array = np.full((npx.shape[0], 1), id(self))
-            npx = np.concatenate((npx, id_array), axis=1)
-        data['inputs'] = np.concatenate((data['inputs'], npx), axis=0) if data['inputs'].size else npx
-        data['outputs'] = np.concatenate((data['outputs'], npy), axis=0) if data['outputs'].size else npy
+            id_array = np.full((np_in.shape[0], 1), id(self))
+            np_in = np.concatenate((np_in, id_array), axis=1)
+        data['inputs'] = np.concatenate((data['inputs'], np_in), axis=0) if data['inputs'].size else np_in
+        data['outputs'] = np.concatenate((data['outputs'], np_out), axis=0) if data['outputs'].size else np_out
     
     def add_function(self, fn=None):
+        """
+        Registers a function (default=host), allowing it to be called when the ModelCaller is called. Returns index of the added function.
+        """
         if fn == None: # add the original unwrapped host function
+            assert self._host_kind == 'function', "host must be a function"
             fn = self._host
         self._functions.append(fn)
-        return len(self._functions) - 1 # return index of the added function
+        return len(self._functions) - 1
     
-    def add_model(self, model=None, quality=False):
-        if model == None:
+    def add_model(self, model=None, qualified=False):
+        """
+        Registers a model (default=host), allowing it to be called when the ModelCaller is called.
+        Returns index of the added model and logs it.
+        qualified (bool): True if the model is qualified.
+        """
+        if model == None: # add the original unwrapped host model
+            assert self._host_kind == 'model', "host must be a model"
             model = self._host
         else:
-            self._frame_model(model)
+            self._standardize(model)
         self._models.append(model)
-        self._qualities.append(quality)
+        self._qualified.append(qualified)
         logger.info(f"After adding a model: {self.fullstr()}")
         idx = len(self._models) - 1
-        if not quality and self.auto_mctrain:
+        if not qualified and self.auto_train:
             self.train_model(idx)
         return idx
-   
+           
+    def clear_dataset(self, kind='tdata'):
+        """
+        Clears all data from either the training or evaluation datasets.
+        """
+        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
+        data = eval('self._'+ kind)
+        data['inputs'] = np.array([])
+        data['outputs'] = np.array([])
+    
     def eval_model(self, idx, all=False):
+        """
+        Evaluates a registered model with available evaluation data, optionally updating the call_target.
+        all (bool): True if called from eval_all
+        """
         if self._edata['inputs'].size == 0:
             return False
         model = self._models[idx]
         score = model._mceval(self._edata['inputs'], self._edata['outputs'])
         res = score >= self.qlty_threshold
         logger.info(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
-        self._qualities[idx] = res
-        if not all:  # not evaluating all models
+        self._qualified[idx] = res
+        if not all and self.auto_call_target:  # not evaluating all models
             self._auto_call_target()
         return res
     
     def eval_all(self):
+        """
+        Evaluates all registered models, optionally updating the call_target.
+        """
         if self._edata['inputs'].size > 0:
             for idx in range(len(self._models)):
                 self.eval_model(idx, all=True)
-            self._auto_call_target()
+            if self.auto_call_target:
+                self._auto_call_target()
 
     def find_data(self, x, kind='tdata'):
+        """
+        Locates a specific input in the training or evaluation data, returning its index and output if found.
+        """
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
         data = eval('self._'+ kind)
         idx = self._npindex(data['inputs'], x)
         y = data['outputs'][idx] if idx >= 0 else None
         return idx, y
       
-    def fullstr(self, full=True, ntail=2): # string representation of MC with ntail inputs and outputs
-        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_mceval='+str(self.auto_mceval) if full else ''}{', auto_mctrain='+str(self.auto_mctrain) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncargs='+str(self._ncargs)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualities}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
+    def fullstr(self, full=True, ntail=2):
+        """
+        Returns a string reptresentation of the ModelCaller.
+        full (bool): True for more attributes.
+        ntail (int): number of last saved data points.
+        """ 
+        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncparams='+str(self._ncparams)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualified}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
     
     def get_call_target(self):
         return self._call_target
@@ -207,35 +249,44 @@ class ModelCaller():
     def get_model(self, idx):
         return self._models[idx]
     
-    def get_model_quality(self, idx):
-        return self._qualities[idx]
+    def isqualified(self, idx):
+        return self._qualified[idx]
     
-    def merge_host(self):
+    def merge_host(self, qualified=True):
+        """
+        Registers the host and set call_target so that host is called even when the ModelCaller is called.
+        """
         assert self._host != None, "no host to merge"
-        idx = self.add_function() if self._host_kind == 'function' else self.add_model(quality=True)
+        idx = self.add_function() if self._host_kind == 'function' else self.add_model(qualified=qualified)
         self.set_call_target('MC')
         return idx, self._host_kind
     
     def remove_data(self, idx, kind='tdata'):
+        """
+        Removes a specific data item based on its index from training or evaluation data.
+        """
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
         data = eval('self._'+ kind)
         data('self._'+ kind)['inputs'].pop(idx)
         data('self._'+ kind)['outputs'].pop(idx)
-        
-    def remove_dataset(self, kind='tdata'):
-        assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
-        data = eval('self._'+ kind)
-        data['inputs'] = np.array([])
-        data['outputs'] = np.array([])
-    
+
     def remove_function(self, idx):
+        """
+        Removes a function from the registered list based on its index.
+        """
         self._functions.pop(idx)
     
     def remove_model(self, idx):
+        """
+        Removes a model from the registered and qualified lists based on its index.
+        """
         self._models.pop(idx)
-        self._qualities.pop(idx)
+        self._qualified.pop(idx)
     
     def set_call_target(self, newstate):
+        """
+        Updates the call target, affecting how calls are directed between MC, host, or both.
+        """
         assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
         if self._host == None and newstate != 'MC':
             logger.warning(f"Can't set call_target to {newstate} because no host")
@@ -243,55 +294,69 @@ class ModelCaller():
             self._call_target = newstate 
  
     def train_model(self, idx, all=False):
+        """
+        Trains a registered model with available training data, optionally triggering an evaluation afterwards.
+        all (bool): True if called from train_all
+        """
         if self._tdata['inputs'].size > 0:
             model = self._models[idx]  
             self._models[idx]._mctrain(self._tdata['inputs'], self._tdata['outputs'])
-            if not all and hasattr(self, 'auto_mceval') and self.auto_mceval:
+            if not all and hasattr(self, 'auto_eval') and self.auto_eval:
                 self.eval_model(idx)
 
     def train_all(self, dataset=None):
+        """
+        Trains all models managed by the ModelCaller, optionally adding a new dataset before training and triggering an evaluation afterwards.
+        """
         if dataset != None:
             self.add_dataset(*dataset, kind='tdata')
         if self._tdata['inputs'].size > 0:
             for idx in range(len(self._models)):
                 self.train_model(idx, all=True)
-            if self.auto_mceval:
+            if self.auto_eval:
                 self.eval_all()
      
-    def wrap_host(self, kind='function', cargs=None): # wrap this MC around a host (model or function) with optional context  (replacing the current host)
-        cargs = cargs or list() # set default
+    def wrap_host(self, kind='function', cparams=None):
+        """
+        Wraps a host (model or function) with the ModelCaller, enhancing it with configured capabilities.
+        cparams (list): list of context parameters
+        """
+        cparams = cparams or list() # set default
         def decorator(host):
             def wrapper(*xs):
-                self._ncargs = len(cargs)
-                if  kind == 'function': # get context values from the caller frame
+                self._ncparams = len(cparams)
+                if  kind == 'function': # get context arguments from the caller frame
                     frame = currentframe().f_back
                     all_variables = {**frame.f_globals, **frame.f_locals}
-                    cvals = [v for k, v in all_variables.items() if k in cargs]
+                    cargs = [v for k, v in all_variables.items() if k in cparams]
                 else: 
                     assert kind == 'model', "kind must be 'function' or 'model'"
-                    nfargs = len(xs) - self._ncargs # number of fn args
-                    xs, cvals = xs[:nfargs], list(xs[nfargs:]) # split xs
+                    nfargs = len(xs) - self._ncparams # number of fn args
+                    xs, cargs = xs[:nfargs], list(xs[nfargs:]) # split xs
                 if self.auto_id:
-                    self._ncargs += 1
-                    cvals.append(id(self))
+                    self._ncparams += 1
+                    cargs.append(id(self))
                 if self._call_target == 'MC':
-                    y = self(*xs, wrapper=True, cvals=cvals) # call only MC
+                    y = self(*xs, wrapper=True, cargs=cargs) # call only MC
                 else:
-                    y = host(*xs) if kind == 'function' else host._mcpredict([list(xs) + cvals]) # call fn or model
+                    y = host(*xs) if kind == 'function' else host._mcpredict([list(xs) + cargs]) # call fn or model
                     if self._call_target == 'both': 
-                        y = (self(*xs, wrapper=True, cvals=cvals) + y) / 2 # call both MC and host
-                y = self._process_result(y, xs, cvals=cvals)
+                        y = (self(*xs, wrapper=True, cargs=cargs) + y) / 2 # call both MC and host
+                y = self._process_result(y, xs, cargs=cargs)
                 return y 
             self._host = host  # save original host function
             self._host_kind = kind 
             wrapper._mc = self  # save MC object in the wrapper
             if kind == 'model':
-                self._frame_model(host)
+                self._standardize(host)
             return wrapper
         self._call_target = 'host'  # initial call target
         return decorator   
    
-    def wrap_sensor(self, skind='direct'): # wrap a sensor around some function g
+    def wrap_sensor(self, skind='direct'):
+        """
+        Wraps a sensor around the decorated function g, enabling additional data capture.
+        """
         def decorator(g): # add other sensors as needed
             def direct(*xs): # direct sensor
                 y = g(*xs)
@@ -305,20 +370,20 @@ class ModelCaller():
         assert skind in ['direct', 'inverse'], "sensor kind must be 'direct' or 'inverse'"
         return decorator
      
-    def _add_data(self, y, *xs):
+    def _add_data(self, out, *ins): # add ins=>out to training or eval data based on edata_fraction
         kind = 'edata' if random() <= self.edata_fraction else 'tdata'
         data = eval('self._'+ kind)
-        xs_np = np.array(xs).reshape(1, -1)  # Reshape xs to a 2D array with one row
-        y_np = np.array([y])  # Make y a 1D array with a single element
+        ins_np = np.array(ins).reshape(1, -1)  # Reshape xs to a 2D array with one row
+        out_np = np.array([out])  # Make y a 1D array with a single element
         if data['inputs'].size == 0:
-            data['inputs'] = xs_np
-            data['outputs'] = y_np
+            data['inputs'] = ins_np
+            data['outputs'] = out_np
         else:
-            data['inputs'] = np.concatenate((data['inputs'], xs_np), axis=0)
-            data['outputs'] = np.concatenate((data['outputs'], y_np), axis=0)
+            data['inputs'] = np.concatenate((data['inputs'], ins_np), axis=0)
+            data['outputs'] = np.concatenate((data['outputs'], out_np), axis=0)
         return kind
     
-    def _around(self, xl, places=1):
+    def _around(self, xl, places=1): # recursively round floats
         if type(xl) in (list, tuple): 
             return [self._around(x, places) for x in xl]
         if isinstance(xl, np.ndarray):
@@ -328,13 +393,13 @@ class ModelCaller():
             return round(xl, places)
         return xl
     
-    def _auto_call_target(self):
-        if sum(self._qualities) == 0: 
+    def _auto_call_target(self): # automatically update call target
+        if (len(self._functions) + sum(self._qualified)) == 0: # no functions or qualified models
             self._call_target = 'host'
-        elif self._call_target == 'host': 
+        elif self._call_target == 'host' and self.auto_call_target: 
             self._call_target = 'both'
                          
-    def _callback(self, kind, *args):
+    def _callback(self, kind, *args): # callback function for feedback (currently only output override)
         def inner(y):
             nonlocal self, kind, args
             data = eval('self._'+ kind)
@@ -345,28 +410,17 @@ class ModelCaller():
             else:
                 logger.warning(f"Feedback callback couldn't find the inputs {args} in {kind}")
         return inner
-         
-    @staticmethod
-    def _frame_model(model):
-        if isinstance(model, BaseEstimator):
-            model._mcpredict = model.predict
-            model._mctrain = model.fit
-            model._mceval = model.score
-        elif isinstance(model, Module):
-            model._mcpredict = lambda x : torch_mcpredict(model, x)
-            model._mctrain = lambda x,y : torch_mctrain(model, x, y)
-            model._mceval = lambda x,y : torch_mceval(model, x, y)
-    
-    def _get_feedback(self, y, *xs, cvals=None):
-        cvals = cvals or list()  # set default
+
+    def _get_feedback(self, y, *xs, cargs=None): # get supervisory feedback
+        cargs = cargs or list()  # set default
         if random() <= self.feedback_fraction:
-            newy = input(f"x={self._around(xs)}, context={self._around(cvals)}, {self._around(y)}. To override y, type a new valueand return, otherwise just press return:")
+            newy = input(f"x={self._around(xs)}, context={self._around(cargs)}, {self._around(y)}. To override y, type a new valueand return, otherwise just press return:")
             if newy != '':  
                 return type(y)(newy)
         return y  
    
     @staticmethod
-    def _npindex(data, *key): # find row index of first match, else -1
+    def _npindex(data, *key): # find row index of first match of key in data, else -1
         if data.size == 0: 
             return -1
         npkey = np.array(key)
@@ -376,58 +430,74 @@ class ModelCaller():
             return idxs[0]
         return -1
      
-    def _npp(self, arr):
+    def _npp(self, arr): # round and convert np array to string
         return '[' + ', '.join([str(row.tolist()) for row in self._around(arr)]) + ']'
     
-    def _process_result(self, y, xs, cvals=None):   
-        cvals = cvals or list()  # set default
-        y = self._get_feedback(y, *xs, cvals=cvals)
+    def _process_result(self, out, ins, cargs=None): # enhance ins=> out with supervisory override, caching, and feedback callback 
+        cargs = cargs or list()  # set default
+        out = self._get_feedback(out, *ins, cargs=cargs)
         if self.auto_cache:
-            kind = self._add_data(y, *xs, *cvals)
-            match y:
-                case str(): y = StrCallback(y, self._callback(kind, *xs, *cvals))
-                case np.ndarray(): y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
-                case _: y = FloatCallback(y, self._callback(kind, *xs, *cvals))
-        return y    
+            kind = self._add_data(out, *ins, *cargs)
+            match out:
+                case str(): out = StrCallback(out, self._callback(kind, *ins, *cargs))
+                case np.ndarray(): out = ArrayCallback(out, self._callback(kind, *ins, *cargs))
+                case _: out = FloatCallback(out, self._callback(kind, *ins, *cargs))
+        return out    
+         
+    def _standardize(self, model): # add standard model interface (_mc* methods)
+        if isinstance(model, BaseEstimator):
+            model._mcpredict = model.predict
+            model._mctrain = model.fit
+            model._mceval = model.score
+        elif isinstance(model, Module):
+            model._mcpredict = lambda x : self._torch_mcpredict(model, x)
+            model._mctrain = lambda x,y : self._torch_mctrain(model, x, y)
+            model._mceval = lambda x,y : self._torch_mceval(model, x, y)
 
-def mc_wrap(host, kind='function', cargs=None, **config):
-    """Wrap a (predefined) model or function in a new ModelCaller object with optional context and config."""
-    return ModelCaller(MCconfig(**config)).wrap_host(kind, cargs)(host)
+    @staticmethod
+    def _torch_mcpredict(model, x):
+        """Predict using a PyTorch model"""
+        model.train(False)
+        xtype = type(x)
+        if xtype == list: 
+            x = np.array(x, dtype=np.float32)
+        y = model(from_numpy(x)).detach().numpy()
+        if xtype == list: 
+            y = y.tolist()
+        return y[0]  
 
-def mc_wrapd(kind='function', cargs=None, **config):
-    """Decorator for wrapping a model or function (being defined) in a new ModelCaller object with optional context and config."""
-    def wrapper(host):
-        return mc_wrap(host, kind, cargs, **config)  
-    return wrapper
+    @staticmethod
+    def _torch_mctrain(model, x, yt, epochs=100, lossfn=mse_loss, optimizer=AdamW):
+        """Train a PyTorch model"""
+        model.train()
+        optimizer = optimizer(model.parameters())
+        x = from_numpy(x)
+        yt = from_numpy(yt)
+        for i in range(epochs): 
+            y = model(x)
+            loss = lossfn(y, yt)
+            optimizer.zero_grad()  # reset gradients
+            loss.backward()
+            optimizer.step()
 
-def torch_mcpredict(model, x):
-    model.train(False)
-    xtype = type(x)
-    if xtype == list: 
-        x = np.array(x, dtype=np.float32)
-    y = model(from_numpy(x)).detach().numpy()
-    if xtype == list: 
-        y = y.tolist()
-    return y[0]  
-
-def torch_mctrain(model, x, yt, epochs=100, lossfn=mse_loss, optimizer=AdamW):
-    model.train()
-    optimizer = optimizer(model.parameters())
-    x = from_numpy(x)
-    yt = from_numpy(yt)
-    for i in range(epochs): 
+    @staticmethod
+    def _torch_mceval(model, x, yt):
+        """Evaluate a PyTorch model, returning a R2 score"""
+        model.train(False)
+        x = from_numpy(x)
+        yt = from_numpy(yt)
         y = model(x)
-        loss = lossfn(y, yt)
-        optimizer.zero_grad()  # reset gradients
-        loss.backward()
-        optimizer.step()
+        sum_error = (y - yt).pow(2).sum()
+        yt_mean = yt.mean()
+        sum_sqr = (yt - yt_mean).pow(2).sum()
+        return (1 - sum_error / sum_sqr).item() 
+    
+def wrap_mc(host, kind='function', cparams=None, **config):
+    """Wrap a predefined model or function as a host in a new ModelCaller object with optional context parameters and configuration."""
+    return ModelCaller(MCconfig(**config)).wrap_host(kind, cparams)(host)
 
-def torch_mceval(model, x, yt):
-    model.train(False)
-    x = from_numpy(x)
-    yt = from_numpy(yt)
-    y = model(x)
-    sum_error = (y - yt).pow(2).sum()
-    yt_mean = yt.mean()
-    sum_sqr = (yt - yt_mean).pow(2).sum()
-    return (1 - sum_error / sum_sqr).item() 
+def decorate_mc(kind='function', cparams=None, **config):
+    """Decorate a model or function definition for wrapping it as a host in a new ModelCaller object with optional context parameters and configuration."""
+    def wrapper(host):
+        return wrap_mc(host, kind, cparams, **config)  
+    return wrapper
