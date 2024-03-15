@@ -1,5 +1,4 @@
 """modelcaller.py. Copyright (C) 2024, Mukesh Dalal <mukesh@aidaa.ai>"""
-
 from dataclasses import dataclass
 from inspect import currentframe
 from random import random
@@ -73,6 +72,13 @@ class FloatCallback(CallbackBase, float):
         """
         assert isinstance(value, (float, int)), "non-float/int value passed to FloatCallback"
         obj = float.__new__(cls, value)  # Instantiate as float
+        obj.cbfn = callback  # Attach callback function
+        return obj
+    
+class StrCallback(CallbackBase, str):
+    def __new__(cls, value, callback):
+        assert isinstance(value, str), "non-str value passed to StrCallback"
+        obj = str.__new__(cls, value)  # Instantiate as str
         obj.cbfn = callback  # Attach callback function
         return obj
 
@@ -156,7 +162,7 @@ class ModelCaller():
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
         self.qlty_threshold =  mcc.qlty_threshold 
         self._call_target = 'MC' # 'MC', 'host', or 'both': who to call when MC or the wrapped host is called?
-        self._edata = {'inputs': np.array([], dtype=float), 'outputs': np.array([], dtype=float)}  # saved evaluation data
+        self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
         self._host = None   # original unwrapped host (gets populated by mc_wrap)
         self._host_kind = None # None, 'model', or 'function'
@@ -182,8 +188,7 @@ class ModelCaller():
     def __getattr__(self, item): # delegate any attribute not defined here to host
         return getattr(self._host, item)
        
-    def __str__(self):
-        return self.fullstr(self, full=False)
+    #def __str__(self): return self.fullstr(self, full=False)
    
     def add_dataset(self, npx, npy, kind='tdata'): # training (default) or evaluation
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -422,9 +427,9 @@ class ModelCaller():
         y = self._get_feedback(y, *xs, cvals=cvals)
         if self.auto_cache:
             kind = self._add_data(y, *xs, *cvals)
-            match type(y):
-                case np.ndarray: y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
-
+            match y:
+                case str(): y = StrCallback(y, self._callback(kind, *xs, *cvals))
+                case np.ndarray(): y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
                 case _: y = FloatCallback(y, self._callback(kind, *xs, *cvals))
         return y    
 

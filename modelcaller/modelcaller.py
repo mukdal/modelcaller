@@ -1,5 +1,4 @@
 """modelcaller.py. Copyright (C) 2024, Mukesh Dalal <mukesh@aidaa.ai>"""
-
 from dataclasses import dataclass
 from inspect import currentframe
 from random import random
@@ -15,20 +14,12 @@ logger = logging.getLogger(__name__)
 
 class CallbackBase:
     """
-    Facilitates adding callbacks to objects. It enables direct callback invocation and 
-    delegates undefined attribute access to the encapsulated object.
-
-    Attributes:
-        value: The object enhanced with a callback.
-        cbfn: The callback function to invoke.
+    Facilitates adding a callback to a value. Don't use this class directly. Instead, use the subclass that's also the subclass of the value's desired class. The value will get encapsulated in the newly created object, which will mostly behave like the original value.
     """
     def __init__(self, value, callback):
         """
-        Initializes the CallbackBase with an object and its callback.
-
-        Args:
-            value: Object to which the callback is added.
-            callback: Callback function.
+        value: Object to which the callback is added.
+        callback: Callback function.
         """
         self.value = value
         self.cbfn = callback
@@ -36,83 +27,50 @@ class CallbackBase:
     def callback(self, *args, **kwargs):
         """
         Executes the callback function with given arguments.
-        
-        Returns:
-            Result of the callback function.
         """
         return self.cbfn(*args, **kwargs)
 
     def __getattr__(self, item):
         """
-        Delegates attribute access to the encapsulated object if not found in this class.
-        
-        Returns:
-            The requested attribute from `value`.
+        Delegates attribute access to the encapsulated value if not found in this class.
         """
         return getattr(self.value, item)
    
     
 class FloatCallback(CallbackBase, float):
     """
-    Extends CallbackBase to support floats and integers with callbacks.
-    It integrates callback functionality into float instances.
+    Encapsulates a float or an int in a float object with a callback.
     """
     def __new__(cls, value, callback):
-        """
-        Creates a new FloatCallback instance, ensuring the value is a float or integer.
-
-        Args:
-            value (float|int): The float or integer value to enhance with a callback.
-            callback (callable): The callback function to associate with this value.
-
-        Returns:
-            A new FloatCallback instance.
-
-        Raises:
-            AssertionError: If `value` is not a float or int.
-        """
         assert isinstance(value, (float, int)), "non-float/int value passed to FloatCallback"
         obj = float.__new__(cls, value)  # Instantiate as float
+        obj.cbfn = callback  # Attach callback function
+        return obj
+    
+class StrCallback(CallbackBase, str):
+    """
+    Encapsulates a str in a str object with a callback.
+    """
+    def __new__(cls, value, callback):
+        assert isinstance(value, str), "non-str value passed to StrCallback"
+        obj = str.__new__(cls, value)  # Instantiate as str
         obj.cbfn = callback  # Attach callback function
         return obj
 
 class ArrayCallback(CallbackBase, np.ndarray):
     """
-    Extends CallbackBase to support numpy arrays with callbacks.
-    Enables callbacks on array operations or accesses.
+    Encapsulates a ndarray in a ndarray object with a callback.
     """
-    def __new__(cls, input_array, callback):
-        """
-        Creates a new ArrayCallback instance from a numpy array.
-
-        Args:
-            input_array (np.ndarray): The numpy array to enhance with a callback.
-            callback (callable): The callback function to associate with the array.
-
-        Returns:
-            A new ArrayCallback instance.
-        """
-        obj = np.asarray(input_array).view(cls)  # Create an instance viewed as ArrayCallback
-        obj.cbfn = callback  # Attach callback function
+    def __new__(cls, value, callback):
+        assert isinstance(value, np.ndarray), "non-ndarray value passed to ArrayCallback"
+        obj = np.asarray(value).view(cls)
+        obj.cbfn = callback
         return obj
 
-    def __array_finalize__(self, obj):
-        """
-        Finalizes the array, ensuring the callback is attached to new instances.
-
-        This method is called automatically when new instances are created through slicing.
-
-        Args:
-            obj: The object from which to inherit the callback, if available.
-        """
-        if obj is None: return  # Exit if obj is None
-        self.cbfn = getattr(obj, 'cbfn', None)  # Inherit or set default callback
-
 @dataclass
-class MCconfig: # default MC configuration
+class MCconfig:
     """
-    Default configuration for ModelCaller operations.
-
+    Default configuration for a ModelCaller object.
     Attributes:
         auto_cache (bool): Enable automatic caching of host call data.
         auto_id (bool): Automatically add MC id as the last context argument; None for thin MC with only auto_id.
@@ -128,7 +86,7 @@ class MCconfig: # default MC configuration
     auto_mceval: bool = True
     auto_mctrain: bool = True
     edata_fraction: float = 0.3
-    feedback_fraction: float = 0#0.1 
+    feedback_fraction: float = 0.1 
     qlty_threshold: float = 0.95
     _ncargs: int = 0
 
@@ -156,14 +114,14 @@ class ModelCaller():
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
         self.qlty_threshold =  mcc.qlty_threshold 
         self._call_target = 'MC' # 'MC', 'host', or 'both': who to call when MC or the wrapped host is called?
-        self._edata = {'inputs': np.array([], dtype=float), 'outputs': np.array([], dtype=float)}  # saved evaluation data
+        self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of functions (same number of args)
         self._host = None   # original unwrapped host (gets populated by mc_wrap)
         self._host_kind = None # None, 'model', or 'function'
         self._models = [] # list of models (same number of args)
         self._ncargs = mcc._ncargs + (1 if self.auto_id else 0)
         self._qualities = [] # list of model qualities
-        self._tdata = {'inputs': np.array([], dtype=float), 'outputs': np.array([], dtype=float)}  # saved training data
+        self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
     def __call__(self, *xs, wrapper=False, cvals=None):
         cvals = cvals or list()  # set default
@@ -182,8 +140,7 @@ class ModelCaller():
     def __getattr__(self, item): # delegate any attribute not defined here to host
         return getattr(self._host, item)
        
-    def __str__(self):
-        return self.fullstr(self, full=False)
+    #def __str__(self): return self.fullstr(self, full=False)
    
     def add_dataset(self, npx, npy, kind='tdata'): # training (default) or evaluation
         assert kind in ['tdata', 'edata'], "dataset kind must be 'tdata' or 'edata'"
@@ -364,7 +321,12 @@ class ModelCaller():
     def _around(self, xl, places=1):
         if type(xl) in (list, tuple): 
             return [self._around(x, places) for x in xl]
-        return np.around(xl, places) 
+        if isinstance(xl, np.ndarray):
+            if np.issubdtype(xl.dtype, np.floating):
+                return np.around(xl, places)
+        if isinstance(xl, float):
+            return round(xl, places)
+        return xl
     
     def _auto_call_target(self):
         if sum(self._qualities) == 0: 
@@ -398,9 +360,9 @@ class ModelCaller():
     def _get_feedback(self, y, *xs, cvals=None):
         cvals = cvals or list()  # set default
         if random() <= self.feedback_fraction:
-            newy = input(f"x={self._around(list(xs))}, context={self._around(list(cvals))}, {y=:.1f}. To override y, type a new value (float) and return, otherwise just press return:")
+            newy = input(f"x={self._around(xs)}, context={self._around(cvals)}, {self._around(y)}. To override y, type a new valueand return, otherwise just press return:")
             if newy != '':  
-                return float(newy)
+                return type(y)(newy)
         return y  
    
     @staticmethod
@@ -422,9 +384,9 @@ class ModelCaller():
         y = self._get_feedback(y, *xs, cvals=cvals)
         if self.auto_cache:
             kind = self._add_data(y, *xs, *cvals)
-            match type(y):
-                case np.ndarray: y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
-
+            match y:
+                case str(): y = StrCallback(y, self._callback(kind, *xs, *cvals))
+                case np.ndarray(): y = ArrayCallback(y, self._callback(kind, *xs, *cvals))
                 case _: y = FloatCallback(y, self._callback(kind, *xs, *cvals))
         return y    
 
