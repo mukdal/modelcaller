@@ -18,9 +18,6 @@
 # In[ ]:
 
 
-#get_ipython().run_line_magic('load_ext', 'autoreload')
-#get_ipython().run_line_magic('autoreload', '2')
-
 import random
 import numpy as np
 from modelcaller import ModelCaller, MCconfig, decorate_mc, wrap_mc
@@ -283,13 +280,29 @@ headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 @decorate_mc()
 def llm(prompt):
-    response = requests.post(API_URL, headers=headers, json=prompt)
-    return response.json()[0]['generated_text']
+    try:
+        response = requests.post(API_URL, headers=headers, json=prompt)
+        return response.json()[0]['generated_text']
+    except Exception as e:
+        logging.error(f"GPT2 raised an exception:{e} for the prompt:{prompt}")
+        return(e)
 
 llm("I want to")
 llm("I do not want to")
 print('A new MC, after two calls to GPT2:', llm._mc.fullstr())
 
+
+# In[ ]:
+
+
 llm = wrap_mc(llm)
 llm("Shakespeare wrote")
-print('A new nested MC, after one calls to GPT2:', llm._mc.fullstr())
+print('A new MC that nests previous MC, after one call to GPT2:', llm._mc.fullstr())
+
+
+# In[ ]:
+
+
+nested_llm = llm._mc.get_host()
+print('The nested MC:', nested_llm._mc.fullstr())
+

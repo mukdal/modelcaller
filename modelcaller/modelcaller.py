@@ -89,7 +89,7 @@ class MCconfig:
     auto_eval: bool = True
     auto_train: bool = True
     edata_fraction: float = 0.3
-    feedback_fraction: float = 0.1 
+    feedback_fraction: float = 0#0.1 
     qlty_threshold: float = 0.95
     _ncparams: int = 0
 
@@ -253,17 +253,18 @@ class ModelCaller():  # abbreviated as MC
         self.update_call_target('MC')
         return idx, self._host_kind
         
-    def register_model(self, model=None, qualified=False):
+    def register_model(self, model=None, qualified=False, model_api=None):
         """
         Registers a model (default=host), allowing it to be called when MC is called.
         Returns index of the added model and logs it.
         qualified (bool): True if the model is qualified.
+        model_api (str): tuple (callfn, trainfn, evalfn) for model API.
         """
         if model == None: # add the original unwrapped host model
             assert self._host_kind == 'model', "host must be a model"
             model = self._host
         else:
-            self._standardize(model)
+            self._standardize(model, model_api)
         self._models.append(model)
         self._qualified.append(qualified)
         logger.info(f"After adding a model: {self.fullstr()}")
@@ -337,10 +338,11 @@ class ModelCaller():  # abbreviated as MC
         else:
             self._call_target = newstate 
   
-    def wrap_host(self, kind='function', cparams=None):
+    def wrap_host(self, kind='function', cparams=None, model_api=None):
         """
         Wraps a host (model or function) with the ModelCaller, enhancing it with configured capabilities.
         cparams (list): list of context parameters
+        model_api (str): tuple (callfn, trainfn, evalfn) for model API
         """
         cparams = cparams or list() # set default
         def decorator(host):
@@ -369,7 +371,7 @@ class ModelCaller():  # abbreviated as MC
             self._host_kind = kind 
             wrapper._mc = self  # save MC object in the wrapper
             if kind == 'model':
-                self._standardize(host)
+                self._standardize(host, model_api)
             return wrapper
         self._call_target = 'host'  # initial call target
         return decorator   
@@ -462,11 +464,16 @@ class ModelCaller():  # abbreviated as MC
             match out:
                 case str(): out = StrCallback(out, self._callback(kind, *ins, *cargs))
                 case np.ndarray(): out = ArrayCallback(out, self._callback(kind, *ins, *cargs))
-                case _: out = FloatCallback(out, self._callback(kind, *ins, *cargs))
+                case float() | int(): out = FloatCallback(out, self._callback(kind, *ins, *cargs))
+                case _: logger.error(f"output {out} of {type(out)} not supported by CallbackBase")
         return out    
          
-    def _standardize(self, model): # add standard model interface (_mc* methods)
-        if isinstance(model, BaseEstimator): # sklearn model
+    def _standardize(self, model, model_api): # add standard model interface (_mc* methods)
+        if model_api != None:
+            model._mccall = model_api[0]
+            model._mctrain = model_api[1]
+            model._mceval = model_api[2]
+        elif isinstance(model, BaseEstimator): # sklearn model
             model._mccall = model.predict
             model._mctrain = model.partial_fit if hasattr(model, 'partial_fit') else model.fit
             model._mceval = model.score
@@ -478,6 +485,8 @@ class ModelCaller():  # abbreviated as MC
             model._mccall = model
             model._mctrain = model.train(data='supervised')
             model._mceval = model.eval(data='supervised')
+        else: 
+            logger.error(f"ModelCaller: {type(model)} models require model_api argument of the form (call_function, train_function, eval_function)")
 
     @staticmethod
     def _torch_mccall(model, x):
