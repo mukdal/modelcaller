@@ -1,8 +1,19 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# Copyright (C) 2024, Mukesh Dalal. 
-# <mukesh@aidaa.ai>
+# ## **ModelCaller**: A Python Library for Creating and Managing AI/ML Model-Calling Components 
+# Copyright (C) 2024, Mukesh Dalal. All rights reserved.
+# [<img align="center" src="https://colab.research.google.com/assets/colab-badge.svg" />](https://colab.research.google.com/github/stanfordnlp/dspy/blob/main/intro.ipynb)
+# 
+# This notebook introduces the **ModelCaller** python library for creating and managing AI/ML model-calling components. ModelCaller facilitates calling, hosting, and registering models and functions with enhanced capabilities like automatic data sensing and caching, training, testing, and capturing supervisory and delayed feedback. It is purposefully designed for predictive and generative AI transformation and continuous improvement of enterprise software.
+# 
+# Contacts:
+# - Business inquiries: mc.business@aidaa.ai
+# - Press inquiries: mc.press@aidaa.ai
+# - Signup for email updates: mc.updates@aidaa.ai
+# - Feedback: mc.feedback@aidaa.ai
+# - [![Twitter URL](https://img.shields.io/twitter/url/https/twitter.com/modelcaller.svg?style=social&label=Follow%20%40modelcaller)](https://twitter.com/modelcaller)
+# - [Join ModelCaller Discord community](https://discord.gg/CgEvYuNS)
 
 # In[ ]:
 
@@ -12,7 +23,7 @@
 
 import random
 import numpy as np
-from modelcaller import ModelCaller, MCconfig, mc_wrapd, mc_wrap
+from modelcaller import ModelCaller, MCconfig, decorate_mc, wrap_mc
 import warnings
 warnings.filterwarnings("ignore")
 import logging
@@ -42,7 +53,7 @@ def repeat_function(f, arity=2, count=10, scale=100):
 # In[ ]:
 
 
-@mc_wrapd(cargs=['globalx'])
+@decorate_mc(cparams=['globalx'])
 def f(x0, x1): 
     global globalx
     return 3 * x0 + x1 + globalx
@@ -66,7 +77,7 @@ print('After a few function calls:', mc.fullstr(full=False))
 
 
 from sklearn.linear_model import LinearRegression
-mc.add_model(LinearRegression())
+mc.register_model(LinearRegression())
 print('After training and evaluating the added model: ', mc.fullstr(full=False))
 
 
@@ -81,7 +92,7 @@ print('After a few more function calls: ', mc.fullstr(full=False))
 
 
 if mc.get_call_target() == 'both': 
-    mc.merge_host()
+    mc.register_host()
     print('After merging host function: ', mc.fullstr(full=False))
     repeat_function(f)
     print('After a few more function calls: ', mc.fullstr(full=False))
@@ -91,7 +102,7 @@ if mc.get_call_target() == 'both':
 
 
 from sklearn.neural_network import MLPRegressor
-midx = mc.add_model(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
+midx = mc.register_model(MLPRegressor(hidden_layer_sizes=(), activation='identity'))
 print('After training and evaluating the added model: ', mc.fullstr(full=False))
 repeat_function(f)
 print('After a few more function calls: ', mc.fullstr(full=False))
@@ -104,7 +115,7 @@ if mc.get_call_target() == 'MC':
     xy = generate_data(mc.get_host())
     mc.add_dataset(xy[0], xy[1])
     print('After adding more data but before training: ', mc.fullstr(full=False))
-    mc.train_all()
+    mc.train_all_models()
     print('After training and evaluating with the new data: ', mc.fullstr(full=False))
     repeat_function(f)
     print('After a few more function calls: ', mc.fullstr(full=False))
@@ -113,10 +124,10 @@ if mc.get_call_target() == 'MC':
 # In[ ]:
 
 
-if mc.get_model_quality(midx) == False:
+if mc.isqualified(midx) == False:
     mc.qlty_threshold = -100
     print('After updating qlty_threshold: ', mc.fullstr())
-    mc.eval_all()
+    mc.eval_all_models()
     print('After reevaluating all models with the new threshold: ', mc.fullstr(full=False))
     repeat_function(f)
     print('After a few more function calls: ', mc.fullstr(full=False))
@@ -125,7 +136,7 @@ if mc.get_model_quality(midx) == False:
 # In[ ]:
 
 
-mc.remove_model(1)
+mc.unregister_model(1)
 mc.qlty_threshold = 0.95
 print('After removing the second model and reverting the threshold: ', mc.fullstr())
 
@@ -133,21 +144,21 @@ print('After removing the second model and reverting the threshold: ', mc.fullst
 # In[ ]:
 
 
-fidx = mc.add_function(lambda x: x * x)
+fidx = mc.register_function(lambda x: x * x)
 print('After adding a new function: ', mc.fullstr(full=False))
 
 
 # In[ ]:
 
 
-mc.remove_function(fidx)
+mc.unregister_function(fidx)
 print('After removing the last function: ', mc.fullstr(full=False))
 
 
 # In[ ]:
 
 
-mc.remove_dataset()
+mc.clear_dataset()
 print('After removing all training data: ', mc.fullstr(full=False))
 repeat_function(f)
 print('After a few more function calls: ', mc.fullstr(full=False))
@@ -203,17 +214,17 @@ print('After a few MC calls: ', mc.fullstr(full=False))
 
 globalx = 1
 y = f(2, 3)
-mc.remove_dataset('tdata')
-mc.remove_dataset('edata')
+mc.clear_dataset('tdata')
+mc.clear_dataset('edata')
 y.callback(100.0)
 
 
 # In[ ]:
 
 
-mc1 = ModelCaller(MCconfig(_ncargs=1))
+mc1 = ModelCaller(MCconfig(_ncparams=1))
 print('A new unwrapped MC with one context argument: ', mc1.fullstr())
-mc1.add_model(mc.get_model(0), quality=True) # reuse model
+mc1.register_model(mc.get_model(0), qualified=True) # reuse model
 repeat_function(mc1, arity=3)
 print('After a few mc calls: ', mc1.fullstr(full=False))
 
@@ -223,7 +234,7 @@ print('After a few mc calls: ', mc1.fullstr(full=False))
 
 import torch
 import torch.nn as nn
-mc1.add_model(nn.Linear(3,1), quality=True)
+mc1.register_model(nn.Linear(3,1), qualified=True)
 print('After adding a pytorch model: ', mc1.fullstr(full=False))
 repeat_function(mc1, arity=3)
 print('After a few mc calls: ', mc1.fullstr(full=False))
@@ -232,7 +243,7 @@ print('After a few mc calls: ', mc1.fullstr(full=False))
 # In[ ]:
 
 
-@mc_wrapd(auto_id=None)
+@decorate_mc(auto_id=None)
 def f2(x0, x1):  # y
     return 3 * x0 + x1
 f2(10,11)
@@ -244,7 +255,7 @@ print('A new wrapped MC with only auto-id and no other context argument, after a
 
 m = LinearRegression()
 m.fit([[1, 2, 3], [3, 4, 5]], [9, 10])
-fpredict = mc_wrap(m.predict)  # wrapping a predefined function
+fpredict = wrap_mc(m.predict)  # wrapping a predefined function
 fpredict([[10, 20, 30]])
 print('A new MC, after wrapping a model.predict and calling MC: ', fpredict._mc.fullstr())
 
@@ -253,10 +264,10 @@ print('A new MC, after wrapping a model.predict and calling MC: ', fpredict._mc.
 
 
 m2 = LinearRegression()
-m = mc_wrap(m, kind='model', auto_id=True)
+m = wrap_mc(m, kind='model', auto_id=True)
 mc2 = m._mc
-mc2.merge_host()
-mc2.train_all((np.array([[1, 2, 3], [3, 4, 5]], dtype=float), np.array([9, 10], dtype=float)))
+mc2.register_host()
+mc2.train_all_models((np.array([[1, 2, 3], [3, 4, 5]], dtype=float), np.array([9, 10], dtype=float)))
 m(10, 20, 30)
 print('A new MC, after wrapping a model and calling fit and predict: ', mc2.fullstr())
 
@@ -270,12 +281,15 @@ HF_TOKEN = os.getenv('HF_TOKEN')
 API_URL = "https://api-inference.huggingface.co/models/gpt2"
 headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-@mc_wrapd()
+@decorate_mc()
 def llm(prompt):
     response = requests.post(API_URL, headers=headers, json=prompt)
     return response.json()[0]['generated_text']
 
 llm("I want to")
 llm("I do not want to")
-print(llm._mc.fullstr())
+print('A new MC, after two calls to GPT2:', llm._mc.fullstr())
 
+llm = wrap_mc(llm)
+llm("Shakespeare wrote")
+print('A new nested MC, after one calls to GPT2:', llm._mc.fullstr())
