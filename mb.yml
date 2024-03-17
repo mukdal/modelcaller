@@ -1,6 +1,0 @@
-auto_cache: True # auto cache host call data?
-auto_test: True # auto test after training a model?
-auto_train: True # auto train after adding a model?
-edata_fraction: 0.3 # fraction of data cached for evaluation (instead of training)
-feedback_fraction: 0.1 # fraction of host calls randomly chosen for feedback
-qlty_threshold: 0.95 # quality (accuracy) threshold for models
