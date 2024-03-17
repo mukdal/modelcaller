@@ -1,4 +1,5 @@
+requests
 numpy
-sklearn
+scikit-learn
 torch
-modelcaller
+#modelcaller

@@ -440,7 +440,7 @@ class ModelCaller():  # abbreviated as MC
     def _get_feedback(self, y, *xs, cargs=None): # get supervisory feedback
         cargs = cargs or list()  # set default
         if random() <= self.feedback_fraction:
-            newy = input(f"x={self._around(xs)}, context={self._around(cargs)}, {self._around(y)}. To override y, type a new valueand return, otherwise just press return:")
+            newy = input(f"x={self._around(xs)}, context={self._around(cargs)}, y={self._around(y)}. To override y, type a new value and return, otherwise just press return:")
             if newy != '':  
                 return type(y)(newy)
         return y  

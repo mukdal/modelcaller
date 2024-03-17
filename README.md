@@ -11,12 +11,17 @@ For academic and professional use:
 
 For software and code attributions:
 "Copyright (c) 2024, Mukesh Dalal. All rights reserved. 
-ModelCaller is available under a custom license based on CC BY-NC-SA. It incorporates software components from the Python Standard Library, Numpy, scikit-learn, and PyTorch under their respective licenses."
+ModelCaller is available under a custom license based on CC BY-NC-SA. It incorporates software components from the Python Standard Library, Requests, Numpy, scikit-learn, and PyTorch under their respective licenses."
 
 Python Standard Library:
 The Python Standard Library is used under the Python Software Foundation License Version 2.
 Copyright (c) 2024, Python Software Foundation; All Rights Reserved
 For more details, see https://docs.python.org/3/license.html
+
+Requests: HTTP for Humans™
+The Requests library is used under the terms of the Apache License 2.0.
+Copyright (c) 2024, Kenneth Reitz
+For more details, https://github.com/psf/requests?tab=Apache-2.0-1-ov-file
 
 Numpy:
 Numpy is used under the BSD License.
