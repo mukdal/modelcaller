@@ -89,7 +89,7 @@ class MCconfig:
     auto_eval: bool = True
     auto_train: bool = True
     edata_fraction: float = 0.3
-    feedback_fraction: float = 0#0.1 
+    feedback_fraction: float = 0.1 
     qlty_threshold: float = 0.95
     _ncparams: int = 0
 
@@ -188,7 +188,7 @@ class ModelCaller():  # abbreviated as MC
         model = self._models[idx]
         score = model._mceval(self._edata['inputs'], self._edata['outputs'])
         res = score >= self.qlty_threshold
-        logger.info(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
+        logger.info(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}\n")
         self._qualified[idx] = res
         if not all and self.auto_call_target:  # not evaluating all models
             self._auto_call_target()
@@ -220,13 +220,16 @@ class ModelCaller():  # abbreviated as MC
         full (bool): True for more attributes.
         ntail (int): number of last saved data points.
         """ 
-        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncparams='+str(self._ncparams)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualified}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
+        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', host_kind='+str(self._host_kind) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncparams='+str(self._ncparams)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualifications:{self._qualified}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
     
     def get_call_target(self):
         return self._call_target
         
     def get_host(self):
         return self._host
+    
+    def get_host_kind(self):
+        return self._host_kind
         
     def get_model(self, idx):
         return self._models[idx]
@@ -267,7 +270,7 @@ class ModelCaller():  # abbreviated as MC
             self._standardize(model, model_api)
         self._models.append(model)
         self._qualified.append(qualified)
-        logger.info(f"After adding a model: {self.fullstr()}")
+        logger.info(f"After adding a model: {self.fullstr()}\n")
         idx = len(self._models) - 1
         if not qualified and self.auto_train:
             self.train_model(idx)
@@ -334,7 +337,7 @@ class ModelCaller():  # abbreviated as MC
         """
         assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
         if self._host == None and newstate != 'MC':
-            logger.warning(f"Can't set call_target to {newstate} because no host")
+            logger.warning(f"Can't set call_target to {newstate} because no host\n")
         else:
             self._call_target = newstate 
   
@@ -347,7 +350,6 @@ class ModelCaller():  # abbreviated as MC
         cparams = cparams or list() # set default
         def decorator(host):
             def wrapper(*xs):
-                self._ncparams = len(cparams)
                 if  kind == 'function': # get context arguments from the caller frame
                     frame = currentframe().f_back
                     all_variables = {**frame.f_globals, **frame.f_locals}
@@ -367,9 +369,10 @@ class ModelCaller():  # abbreviated as MC
                         y = (self(*xs, wrapper=True, cargs=cargs) + y) / 2 # call both MC and host
                 y = self._process_result(y, xs, cargs=cargs)
                 return y 
+            self._ncparams = len(cparams) # set number of context parameters
             self._host = host  # save original host function
-            self._host_kind = kind 
-            wrapper._mc = self  # save MC object in the wrapper
+            self._host_kind = kind # set host kind
+            wrapper.mc = self  # save MC object in the wrapper
             if kind == 'model':
                 self._standardize(host, model_api)
             return wrapper
@@ -431,13 +434,13 @@ class ModelCaller():  # abbreviated as MC
                 data['outputs'][idx] = y
                 return y
             else:
-                logger.warning(f"Feedback callback couldn't find the inputs {args} in {kind}")
+                logger.warning(f"Feedback callback couldn't find the inputs {args} in {kind}\n")
         return inner
 
     def _get_feedback(self, y, *xs, cargs=None): # get supervisory feedback
         cargs = cargs or list()  # set default
         if random() <= self.feedback_fraction:
-            newy = input(f"x={self._around(xs)}, context={self._around(cargs)}, {self._around(y)}. To override y, type a new valueand return, otherwise just press return:")
+            newy = input(f"x={self._around(xs)}, context={self._around(cargs)}, y={self._around(y)}. To override y, type a new value and return, otherwise just press return:")
             if newy != '':  
                 return type(y)(newy)
         return y  
@@ -465,7 +468,7 @@ class ModelCaller():  # abbreviated as MC
                 case str(): out = StrCallback(out, self._callback(kind, *ins, *cargs))
                 case np.ndarray(): out = ArrayCallback(out, self._callback(kind, *ins, *cargs))
                 case float() | int(): out = FloatCallback(out, self._callback(kind, *ins, *cargs))
-                case _: logger.error(f"output {out} of {type(out)} not supported by CallbackBase")
+                case _: logger.error(f"output {out} of {type(out)} not supported by CallbackBase\n")
         return out    
          
     def _standardize(self, model, model_api): # add standard model interface (_mc* methods)
@@ -486,7 +489,7 @@ class ModelCaller():  # abbreviated as MC
             model._mctrain = model.train(data='supervised')
             model._mceval = model.eval(data='supervised')
         else: 
-            logger.error(f"ModelCaller: {type(model)} models require model_api argument of the form (call_function, train_function, eval_function)")
+            logger.error(f"ModelCaller: {type(model)} models require model_api argument of the form (call_function, train_function, eval_function)\n")
 
     @staticmethod
     def _torch_mccall(model, x):

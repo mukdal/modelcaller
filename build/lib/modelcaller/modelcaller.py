@@ -1,4 +1,4 @@
-"""modelcaller.py. Copyright (C) 2024, Mukesh Dalal <mukesh@aidaa.ai>"""
+"""Copyright (C) 2024, Mukesh Dalal. All rights reserved. <mukesh@aidaa.ai>"""
 from dataclasses import dataclass
 from inspect import currentframe
 from random import random
@@ -35,7 +35,9 @@ class CallbackBase:
         Delegates attribute access to the encapsulated value if not found in this class.
         """
         return getattr(self.value, item)
-   
+
+    def __repr__(self):
+        return str(type(self)) + ':(' + str(self.value) + ', ' + str(self.cbfn) + ')'   
     
 class FloatCallback(CallbackBase, float):
     """
@@ -91,13 +93,13 @@ class MCconfig:
     qlty_threshold: float = 0.95
     _ncparams: int = 0
 
-class ModelCaller():
+class ModelCaller():  # abbreviated as MC
     """
-    Facilitates wrapping, connecting, training, testing, and calling models and functions with enhanced capabilities like automatic training, testing, feedback collection, and data caching.
+    Facilitates calling, hosting, and registering models and functions with enhanced capabilities like automatic data sensing and caching, training, testing, and capturing supervisory and delayed feedback.
     """
     def __init__(self, mcc=MCconfig()):
         """
-        mcc (MCconfig):  ModelCaller Configuration.
+        mcc (MCconfig):  MC Configuration.
         """
         super().__init__()
         self.auto_cache = False if mcc.auto_id == None else mcc.auto_cache
@@ -118,7 +120,7 @@ class ModelCaller():
         self._qualified = [] # list of bools indicating whether corresponding model is qualified
         self._tdata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved training data
         
-    def __call__(self, *xs, wrapper=False, cargs=None):
+    def __call__(self, *xs, wrapper=False, cargs=None):  # predict using MC
         """
         Calls registered models and functions and caches data based on configuration.
         xs (list): List of function arguments.
@@ -132,7 +134,7 @@ class ModelCaller():
             nfargs = len(xs) - self._ncparams # number of fn args
             xs, cargs = xs[:nfargs], xs[nfargs:]
         fsum = sum([f(*xs) for f in self._functions])  # call functions
-        msum = sum([model._mcpredict([list(xs)+list(cargs)]) for idx, model in enumerate(self._models) if self._qualified[idx]]) # call qualified models
+        msum = sum([model._mccall([list(xs)+list(cargs)]) for idx, model in enumerate(self._models) if self._qualified[idx]]) # call qualified models
         res = (msum + fsum)[0] / nensemble # average
         if not wrapper: # otherwise, this will be done in the host wrapper
             res = self._process_result(res, xs, cargs)
@@ -158,35 +160,6 @@ class ModelCaller():
         data['inputs'] = np.concatenate((data['inputs'], np_in), axis=0) if data['inputs'].size else np_in
         data['outputs'] = np.concatenate((data['outputs'], np_out), axis=0) if data['outputs'].size else np_out
     
-    def add_function(self, fn=None):
-        """
-        Registers a function (default=host), allowing it to be called when the ModelCaller is called. Returns index of the added function.
-        """
-        if fn == None: # add the original unwrapped host function
-            assert self._host_kind == 'function', "host must be a function"
-            fn = self._host
-        self._functions.append(fn)
-        return len(self._functions) - 1
-    
-    def add_model(self, model=None, qualified=False):
-        """
-        Registers a model (default=host), allowing it to be called when the ModelCaller is called.
-        Returns index of the added model and logs it.
-        qualified (bool): True if the model is qualified.
-        """
-        if model == None: # add the original unwrapped host model
-            assert self._host_kind == 'model', "host must be a model"
-            model = self._host
-        else:
-            self._standardize(model)
-        self._models.append(model)
-        self._qualified.append(qualified)
-        logger.info(f"After adding a model: {self.fullstr()}")
-        idx = len(self._models) - 1
-        if not qualified and self.auto_train:
-            self.train_model(idx)
-        return idx
-           
     def clear_dataset(self, kind='tdata'):
         """
         Clears all data from either the training or evaluation datasets.
@@ -196,23 +169,32 @@ class ModelCaller():
         data['inputs'] = np.array([])
         data['outputs'] = np.array([])
     
+    def eval(self):
+        """
+        Evaluates MC (not registered models) with available evaluation data.
+        """
+        if self._edata['inputs'].size == 0:
+            return False
+        outs = self(self._edata['inputs'])
+        return self._r2_error(outs, self._edata['outputs'])
+        
     def eval_model(self, idx, all=False):
         """
         Evaluates a registered model with available evaluation data, optionally updating the call_target.
-        all (bool): True if called from eval_all
+        all (bool): True if called from eval_all_models
         """
         if self._edata['inputs'].size == 0:
             return False
         model = self._models[idx]
         score = model._mceval(self._edata['inputs'], self._edata['outputs'])
         res = score >= self.qlty_threshold
-        logger.info(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}")
+        logger.info(f"Compare Model {idx} score = {score} with qlty_threshold {self.qlty_threshold} => quality = {res}\n")
         self._qualified[idx] = res
         if not all and self.auto_call_target:  # not evaluating all models
             self._auto_call_target()
         return res
     
-    def eval_all(self):
+    def eval_all_models(self):
         """
         Evaluates all registered models, optionally updating the call_target.
         """
@@ -234,33 +216,66 @@ class ModelCaller():
       
     def fullstr(self, full=True, ntail=2):
         """
-        Returns a string reptresentation of the ModelCaller.
+        Returns a string reptresentation of MC.
         full (bool): True for more attributes.
         ntail (int): number of last saved data points.
         """ 
-        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncparams='+str(self._ncparams)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualities:{self._qualified}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
+        return f"{'auto_cache='+str(self.auto_cache) if full else ''}{', auto_id='+str(self.auto_id) if full else ''}{', auto_eval='+str(self.auto_eval) if full else ''}{', auto_train='+str(self.auto_train) if full else ''}{', edata_fraction='+str(self.edata_fraction) if full else ''}{', feedback_fraction='+str(self.feedback_fraction) if full else ''}{', host_kind='+str(self._host_kind) if full else ''}{', qlty_threshold='+str(self.qlty_threshold) if full else ''}{', ncparams='+str(self._ncparams)+', ' if full else ''}call_target:{self._call_target}, #functions:{len(self._functions)}, model-qualifications:{self._qualified}, #tdata:{len(self._tdata['inputs'])}, #edata:{len(self._edata['inputs'])}; tinputs:{'...' if len(self._tdata['inputs']) > ntail  else ''}{self._npp(self._tdata['inputs'][-ntail:])}; toutputs:{'...' if len(self._tdata['outputs']) > ntail else ''}{self._npp(self._tdata['outputs'][-ntail:])}; einputs:{'...' if len(self._edata['inputs']) > ntail  else ''}{self._npp(self._edata['inputs'][-ntail:])}; eoutputs:{'...' if len(self._edata['outputs']) > ntail else ''}{self._npp(self._edata['outputs'][-ntail:])}"
     
     def get_call_target(self):
         return self._call_target
         
     def get_host(self):
         return self._host
+    
+    def get_host_kind(self):
+        return self._host_kind
         
     def get_model(self, idx):
         return self._models[idx]
     
     def isqualified(self, idx):
         return self._qualified[idx]
-    
-    def merge_host(self, qualified=True):
+        
+    def register_function(self, fn=None):
         """
-        Registers the host and set call_target so that host is called even when the ModelCaller is called.
+        Registers a function (default=host), allowing it to be called when MC is called. Returns index of the added function.
+        """
+        if fn == None: # add the original unwrapped host function
+            assert self._host_kind == 'function', "host must be a function"
+            fn = self._host
+        self._functions.append(fn)
+        return len(self._functions) - 1
+
+    def register_host(self, qualified=True):
+        """
+        Registers the host and sets call_target so that host is called even when MC is called.
         """
         assert self._host != None, "no host to merge"
-        idx = self.add_function() if self._host_kind == 'function' else self.add_model(qualified=qualified)
-        self.set_call_target('MC')
+        idx = self.register_function() if self._host_kind == 'function' else self.register_model(qualified=qualified)
+        self.update_call_target('MC')
         return idx, self._host_kind
-    
+        
+    def register_model(self, model=None, qualified=False, model_api=None):
+        """
+        Registers a model (default=host), allowing it to be called when MC is called.
+        Returns index of the added model and logs it.
+        qualified (bool): True if the model is qualified.
+        model_api (str): tuple (callfn, trainfn, evalfn) for model API.
+        """
+        if model == None: # add the original unwrapped host model
+            assert self._host_kind == 'model', "host must be a model"
+            model = self._host
+        else:
+            self._standardize(model, model_api)
+        self._models.append(model)
+        self._qualified.append(qualified)
+        logger.info(f"After adding a model: {self.fullstr()}\n")
+        idx = len(self._models) - 1
+        if not qualified and self.auto_train:
+            self.train_model(idx)
+        return idx
+       
     def remove_data(self, idx, kind='tdata'):
         """
         Removes a specific data item based on its index from training or evaluation data.
@@ -270,33 +285,20 @@ class ModelCaller():
         data('self._'+ kind)['inputs'].pop(idx)
         data('self._'+ kind)['outputs'].pop(idx)
 
-    def remove_function(self, idx):
+    def train(self, nested=True, dataset=None):
         """
-        Removes a function from the registered list based on its index.
+        Trains MC, optionally adding a new dataset before training, in which case, optionally also train all registered models.
         """
-        self._functions.pop(idx)
+        if dataset != None:
+            self.add_dataset(*dataset, kind='tdata')
+        # add local training code, if local parameters
+        if nested:
+            self.train_all_models()
     
-    def remove_model(self, idx):
-        """
-        Removes a model from the registered and qualified lists based on its index.
-        """
-        self._models.pop(idx)
-        self._qualified.pop(idx)
-    
-    def set_call_target(self, newstate):
-        """
-        Updates the call target, affecting how calls are directed between MC, host, or both.
-        """
-        assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
-        if self._host == None and newstate != 'MC':
-            logger.warning(f"Can't set call_target to {newstate} because no host")
-        else:
-            self._call_target = newstate 
- 
     def train_model(self, idx, all=False):
         """
         Trains a registered model with available training data, optionally triggering an evaluation afterwards.
-        all (bool): True if called from train_all
+        all (bool): True if called from train_all_models
         """
         if self._tdata['inputs'].size > 0:
             model = self._models[idx]  
@@ -304,7 +306,7 @@ class ModelCaller():
             if not all and hasattr(self, 'auto_eval') and self.auto_eval:
                 self.eval_model(idx)
 
-    def train_all(self, dataset=None):
+    def train_all_models(self, dataset=None):
         """
         Trains all models managed by the ModelCaller, optionally adding a new dataset before training and triggering an evaluation afterwards.
         """
@@ -314,17 +316,40 @@ class ModelCaller():
             for idx in range(len(self._models)):
                 self.train_model(idx, all=True)
             if self.auto_eval:
-                self.eval_all()
-     
-    def wrap_host(self, kind='function', cparams=None):
+                self.eval_all_models()
+    
+    def unregister_function(self, idx):
+        """
+        Removes a function from the registered list based on its index.
+        """
+        self._functions.pop(idx)
+    
+    def unregister_model(self, idx):
+        """
+        Removes a model from the registered and qualified lists based on its index.
+        """
+        self._models.pop(idx)
+        self._qualified.pop(idx)
+    
+    def update_call_target(self, newstate):
+        """
+        Updates the call target, affecting how calls are directed between MC, host, or both.
+        """
+        assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
+        if self._host == None and newstate != 'MC':
+            logger.warning(f"Can't set call_target to {newstate} because no host\n")
+        else:
+            self._call_target = newstate 
+  
+    def wrap_host(self, kind='function', cparams=None, model_api=None):
         """
         Wraps a host (model or function) with the ModelCaller, enhancing it with configured capabilities.
         cparams (list): list of context parameters
+        model_api (str): tuple (callfn, trainfn, evalfn) for model API
         """
         cparams = cparams or list() # set default
         def decorator(host):
             def wrapper(*xs):
-                self._ncparams = len(cparams)
                 if  kind == 'function': # get context arguments from the caller frame
                     frame = currentframe().f_back
                     all_variables = {**frame.f_globals, **frame.f_locals}
@@ -339,16 +364,17 @@ class ModelCaller():
                 if self._call_target == 'MC':
                     y = self(*xs, wrapper=True, cargs=cargs) # call only MC
                 else:
-                    y = host(*xs) if kind == 'function' else host._mcpredict([list(xs) + cargs]) # call fn or model
+                    y = host(*xs) if kind == 'function' else host._mccall([list(xs) + cargs]) # call fn or model
                     if self._call_target == 'both': 
                         y = (self(*xs, wrapper=True, cargs=cargs) + y) / 2 # call both MC and host
                 y = self._process_result(y, xs, cargs=cargs)
                 return y 
+            self._ncparams = len(cparams) # set number of context parameters
             self._host = host  # save original host function
-            self._host_kind = kind 
-            wrapper._mc = self  # save MC object in the wrapper
+            self._host_kind = kind # set host kind
+            wrapper.mc = self  # save MC object in the wrapper
             if kind == 'model':
-                self._standardize(host)
+                self._standardize(host, model_api)
             return wrapper
         self._call_target = 'host'  # initial call target
         return decorator   
@@ -408,7 +434,7 @@ class ModelCaller():
                 data['outputs'][idx] = y
                 return y
             else:
-                logger.warning(f"Feedback callback couldn't find the inputs {args} in {kind}")
+                logger.warning(f"Feedback callback couldn't find the inputs {args} in {kind}\n")
         return inner
 
     def _get_feedback(self, y, *xs, cargs=None): # get supervisory feedback
@@ -441,21 +467,32 @@ class ModelCaller():
             match out:
                 case str(): out = StrCallback(out, self._callback(kind, *ins, *cargs))
                 case np.ndarray(): out = ArrayCallback(out, self._callback(kind, *ins, *cargs))
-                case _: out = FloatCallback(out, self._callback(kind, *ins, *cargs))
+                case float() | int(): out = FloatCallback(out, self._callback(kind, *ins, *cargs))
+                case _: logger.error(f"output {out} of {type(out)} not supported by CallbackBase\n")
         return out    
          
-    def _standardize(self, model): # add standard model interface (_mc* methods)
-        if isinstance(model, BaseEstimator):
-            model._mcpredict = model.predict
-            model._mctrain = model.fit
+    def _standardize(self, model, model_api): # add standard model interface (_mc* methods)
+        if model_api != None:
+            model._mccall = model_api[0]
+            model._mctrain = model_api[1]
+            model._mceval = model_api[2]
+        elif isinstance(model, BaseEstimator): # sklearn model
+            model._mccall = model.predict
+            model._mctrain = model.partial_fit if hasattr(model, 'partial_fit') else model.fit
             model._mceval = model.score
-        elif isinstance(model, Module):
-            model._mcpredict = lambda x : self._torch_mcpredict(model, x)
+        elif isinstance(model, Module): # pytorch model
+            model._mccall = lambda x : self._torch_mccall(model, x)
             model._mctrain = lambda x,y : self._torch_mctrain(model, x, y)
             model._mceval = lambda x,y : self._torch_mceval(model, x, y)
+        elif isinstance(model, ModelCaller): # nested
+            model._mccall = model
+            model._mctrain = model.train(data='supervised')
+            model._mceval = model.eval(data='supervised')
+        else: 
+            logger.error(f"ModelCaller: {type(model)} models require model_api argument of the form (call_function, train_function, eval_function)\n")
 
     @staticmethod
-    def _torch_mcpredict(model, x):
+    def _torch_mccall(model, x):
         """Predict using a PyTorch model"""
         model.train(False)
         xtype = type(x)
@@ -480,13 +517,17 @@ class ModelCaller():
             loss.backward()
             optimizer.step()
 
-    @staticmethod
-    def _torch_mceval(model, x, yt):
+    def _torch_mceval(self, model, x, yt):
         """Evaluate a PyTorch model, returning a R2 score"""
         model.train(False)
         x = from_numpy(x)
         yt = from_numpy(yt)
         y = model(x)
+        return self._r2_error(y, yt)
+    
+    @staticmethod
+    def _r2_error(self, y, yt):
+        """return R2 score between y and yt"""
         sum_error = (y - yt).pow(2).sum()
         yt_mean = yt.mean()
         sum_sqr = (yt - yt_mean).pow(2).sum()
