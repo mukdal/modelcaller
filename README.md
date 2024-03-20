@@ -3,6 +3,8 @@ Introduction, Features, Installation, Usage, Contributing, License, and Credits.
 LICENSE:
 This software is licensed under a custom license included with this distibution in the file LICENSE.txt, generally based on CC BY-NC-SA (Attribution-NonCommercial-ShareAlike 4.0 International, see https://creativecommons.org/licenses/by-nc-sa/4.0/). This license allows reusers to distribute, remix, adapt, and build upon the material in any medium or format for noncommercial purposes only, and only so long as attribution is given to the creator. If you remix, adapt, or build upon the material, you must license the modified material under identical terms.
 
+Please contact us at mc.business@aidaa.ai for free limited commercial licensing.
+
 Attribution:
 If you use this software in your work, you must provide proper attribution to the creator using the following suggested format:
 

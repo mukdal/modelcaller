@@ -110,7 +110,7 @@ class ModelCaller():  # abbreviated as MC
         self.edata_fraction = mcc.edata_fraction 
         self.feedback_fraction = 0 if mcc.auto_id == None else mcc.feedback_fraction 
         self.qlty_threshold =  mcc.qlty_threshold 
-        self._call_target = 'MC' # 'MC', 'host', or 'both': who to call when MC or the wrapped host is called?
+        self._call_target = 'registered' # 'registered', 'host', or 'both': who to call when MC or the wrapped host is called?
         self._edata = {'inputs': np.array([]), 'outputs': np.array([])}  # saved evaluation data
         self._functions = [] # list of registered functions
         self._host = None   # original unwrapped host (gets populated by wrap_host method)
@@ -253,7 +253,7 @@ class ModelCaller():  # abbreviated as MC
         """
         assert self._host != None, "no host to merge"
         idx = self.register_function() if self._host_kind == 'function' else self.register_model(qualified=qualified)
-        self.update_call_target('MC')
+        self.update_call_target('registered')
         return idx, self._host_kind
         
     def register_model(self, model=None, qualified=False, model_api=None):
@@ -335,8 +335,8 @@ class ModelCaller():  # abbreviated as MC
         """
         Updates the call target, affecting how calls are directed between MC, host, or both.
         """
-        assert newstate in ['host', 'both', 'MC'], "call_target must be 'host', 'both' or 'MC'"
-        if self._host == None and newstate != 'MC':
+        assert newstate in ['host', 'both', 'registered'], "call_target must be 'host', 'both' or 'registered'"
+        if self._host == None and newstate != 'registered':
             logger.warning(f"Can't set call_target to {newstate} because no host\n")
         else:
             self._call_target = newstate 
@@ -361,7 +361,7 @@ class ModelCaller():  # abbreviated as MC
                 if self.auto_id:
                     self._ncparams += 1
                     cargs.append(id(self))
-                if self._call_target == 'MC':
+                if self._call_target == 'registered':
                     y = self(*xs, wrapper=True, cargs=cargs) # call only MC
                 else:
                     y = host(*xs) if kind == 'function' else host._mccall([list(xs) + cargs]) # call fn or model
