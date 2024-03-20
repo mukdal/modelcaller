@@ -6,4 +6,5 @@ modelcaller/modelcaller.py
 modelcaller.egg-info/PKG-INFO
 modelcaller.egg-info/SOURCES.txt
 modelcaller.egg-info/dependency_links.txt
+modelcaller.egg-info/requires.txt
 modelcaller.egg-info/top_level.txt
